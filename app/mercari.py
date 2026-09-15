@@ -10,6 +10,7 @@ import httpx
 from mercapi import Mercapi
 from mercapi.models import Item
 from mercapi.models.product import Product
+from mercapi.requests import SearchRequestData
 
 ITEM_URL_BASE = "https://jp.mercari.com/item/"
 SHOP_URL_BASE = "https://jp.mercari.com/shops/product/"
@@ -124,6 +125,11 @@ class MercariClient:
         mercapi 0.5.0 has no `limit` parameter; each page holds up to ~120
         items and pagination uses `page_token` (verified in Phase 0).
 
+        Only on-sale listings are requested: `status=[STATUS_ON_SALE]`
+        excludes sold-out and trading items server-side (verified live —
+        the filter returns ITEM_STATUS_ON_SALE results only, for both
+        regular items and Mercari Shops listings).
+
         `exclude` is passed through to Mercari's single-phrase
         excludeKeyword. List-based exclude keywords are NOT reliable there,
         so they are handled locally by Level 1 (app.filter).
@@ -137,6 +143,7 @@ class MercariClient:
                     price_min=min_price,
                     price_max=max_price,
                     exclude=exclude,
+                    status=[SearchRequestData.Status.STATUS_ON_SALE],
                     page_token=page_token,
                 )
             except Exception as exc:

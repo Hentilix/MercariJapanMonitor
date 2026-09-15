@@ -727,7 +727,7 @@ def settings_status() -> None:
 
 # --------------------------------------------------------------------- page
 @ui.page("/")
-def index() -> None:
+async def index() -> None:
     # NiceGUI 3.x requires ALL UI inside page functions when ui.page is used,
     # so the dialog is built here and its elements are shared via globals
     # (single-user local app).
@@ -789,11 +789,11 @@ def index() -> None:
 
         ui.separator()
         ui.label("匹配商品历史（按 Monitor 查看）").classes("text-xl font-bold")
-        history_view()
+        await history_view()
 
         ui.separator()
         ui.label("忽略商品（按 Monitor 查看）").classes("text-xl font-bold")
-        ignored_view()
+        await ignored_view()
 
     # monitor form dialog
     with ui.dialog() as monitor_dialog, ui.card().classes("w-[560px]"):
