@@ -1,0 +1,1 @@
+"""MercariJapanMonitor application package."""

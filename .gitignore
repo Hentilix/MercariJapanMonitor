@@ -1,0 +1,15 @@
+# Python virtual environment
+.venv/
+
+# Python caches
+__pycache__/
+.pytest_cache/
+
+# Runtime data — SQLite database files only (keep data/ directory itself)
+data/*.db
+
+# Runtime logs (Phase 5.6 file logging)
+data/logs/
+
+# Secrets — if a .env file is ever used, it must never be committed
+.env
