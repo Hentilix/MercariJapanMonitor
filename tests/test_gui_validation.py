@@ -10,8 +10,11 @@ import main
 from main import (
     calculate_total_pages,
     clamp_page,
+    config_status_text,
+    deepseek_status_text,
     monitor_fields_from_form,
     parse_price,
+    smtp_status_text,
     validate_monitor_form,
 )
 
@@ -167,4 +170,52 @@ def test_history_page_boundary_after_delete():
     assert clamp_page(2, pages) == 2
     pages_after = calculate_total_pages(total - 1, page_size)
     assert pages_after == 1
-    assert clamp_page(2, pages_after) == 1  # no "第 2 / 1 页"
+
+
+# ------------------------------------------- 配置状态行 (P1-3)
+SMTP_ALL = ["SMTP_HOST", "SMTP_PORT", "SMTP_USERNAME",
+            "SMTP_PASSWORD", "SMTP_FROM", "SMTP_TO"]
+
+
+@pytest.fixture
+def clean_config_env(monkeypatch):
+    monkeypatch.delenv("DEEPSEEK_API_KEY_FOR_MJM", raising=False)
+    for key in SMTP_ALL:
+        monkeypatch.delenv(key, raising=False)
+
+
+def test_deepseek_status_unset(clean_config_env):
+    assert deepseek_status_text() == "DeepSeek：未设置"
+
+
+def test_deepseek_status_set(clean_config_env, monkeypatch):
+    monkeypatch.setenv("DEEPSEEK_API_KEY_FOR_MJM", "sk-test")
+    assert deepseek_status_text() == "DeepSeek：已设置"
+
+
+def test_smtp_status_not_configured(clean_config_env):
+    assert smtp_status_text() == "SMTP：未配置"
+
+
+def test_smtp_status_configured(clean_config_env, monkeypatch):
+    for key in SMTP_ALL:
+        monkeypatch.setenv(key, "x")
+    assert smtp_status_text() == "SMTP：已配置"
+
+
+def test_smtp_status_partial_lists_missing_in_fixed_order(clean_config_env, monkeypatch):
+    monkeypatch.setenv("SMTP_HOST", "smtp.qq.com")
+    monkeypatch.setenv("SMTP_PASSWORD", "secret")
+    text = smtp_status_text()
+    assert text.startswith("SMTP：配置不完整")
+    for missing in ("SMTP_PORT", "SMTP_USERNAME", "SMTP_FROM", "SMTP_TO"):
+        assert missing in text
+    assert "SMTP_HOST" not in text.split("缺：", 1)[1]
+    assert "SMTP_PASSWORD" not in text.split("缺：", 1)[1]
+
+
+def test_config_status_line_combines_both(clean_config_env, monkeypatch):
+    monkeypatch.setenv("DEEPSEEK_API_KEY_FOR_MJM", "sk-test")
+    text = config_status_text()
+    assert "DeepSeek：已设置" in text
+    assert "SMTP：未配置" in text

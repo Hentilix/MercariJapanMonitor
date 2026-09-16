@@ -4,9 +4,12 @@ Monitor-centric scan: processing state lives in monitor_products /
 ignored_products keyed by (monitor_id, mercari_id).
 
 "Processed" semantics:
-  * without AI: Level 1 pass == processing done -> recorded as matched
-  * with AI:    full_item() success + an explicit true/false verdict
-                == processing done -> only then recorded
+  * without AI (ai_requirement empty): Level 1 pass == processing done
+    -> recorded as matched
+  * with AI (ai_requirement non-empty): full_item() success + an explicit
+    true/false verdict == processing done -> only then recorded.
+    A missing judge (e.g. DeepSeek key unavailable at wiring time) is an
+    AI error, NEVER a silent match: items stay unprocessed.
   Items whose full_item() or AI judgement failed are NOT recorded, so the
   next scan sees them as new again and retries them.
 
@@ -73,16 +76,38 @@ async def scan_monitor(
     A Mercari search failure records a failure status and re-raises
     (the scheduler/caller decides what to do next).
     """
+    keywords = split_keywords(monitor.keywords)
+    exclude_words = split_keywords(monitor.filter_words)
     rule = FilterRule(
-        keywords=split_keywords(monitor.keywords),
-        exclude_keywords=split_keywords(monitor.filter_words),
+        keywords=keywords,
+        exclude_keywords=exclude_words,
         min_price=monitor.min_price,
         max_price=monitor.max_price,
         match_mode=monitor.keyword_mode,
     )
 
+    # P0-1 fix: the Mercari query is the SPACE-JOINED keywords. The raw
+    # string (with Chinese commas) went to Mercari verbatim and crushed
+    # recall (verified live: "Waltz For Debby，Bill Evans" -> 15 results,
+    # "Waltz For Debby Bill Evans" -> 242). Level 1 keeps the comma-split
+    # keyword list above — never the joined phrase.
+    search_query = " ".join(keywords)
+
+    # P1-1 fix: push the monitor's price range and exclude words into the
+    # Mercari search itself, so the first pages are not wasted on items the
+    # local Level 1 would reject anyway. mercapi 0.5.0 accepts ONE exclude
+    # string (excludeKeyword), so the words are space-joined; the local
+    # FilterRule above stays the final authority for per-word exclusion.
+    search_exclude = " ".join(exclude_words) or None
+
     try:
-        products = await client.search_products(monitor.keywords, max_pages=max_pages)
+        products = await client.search_products(
+            search_query,
+            min_price=monitor.min_price,
+            max_price=monitor.max_price,
+            exclude=search_exclude,
+            max_pages=max_pages,
+        )
     except MercariError as exc:
         db.set_last_scan(
             monitor.id, f"搜索失败: {type(exc).__name__}: {exc}"
@@ -126,17 +151,33 @@ async def scan_monitor(
     matched_items: list[SearchItem] = []
 
     if judge is None:
-        # No AI gate: every unprocessed Level-1 candidate is a match.
-        for item in targets:
-            _record_monitor_product(db, monitor, item, matched=True)
-            result.ai_matched += 1
-            matched_items.append(item)
-            log.info(
-                "MATCH (no AI): %s | %s | %s",
-                item.id,
-                item.title,
-                _fmt_price(item.price),
+        if monitor.ai_requirement:
+            # P0-2 fix: the monitor requires AI but no judge is available
+            # (e.g. the DeepSeek key was missing when the caller built the
+            # judge). Never match without judgement: leave the items
+            # unprocessed so the next scan retries them. Nothing enters the
+            # history and nothing is emailed.
+            result.ai_errors += len(targets)
+            log.warning(
+                "Monitor %s (%s): AI required but no judge available — "
+                "%d candidate(s) left unprocessed (will retry next scan)",
+                monitor.id,
+                monitor.name,
+                len(targets),
             )
+        else:
+            # No AI gate (ai_requirement empty): every unprocessed
+            # Level-1 candidate is a match.
+            for item in targets:
+                _record_monitor_product(db, monitor, item, matched=True)
+                result.ai_matched += 1
+                matched_items.append(item)
+                log.info(
+                    "MATCH (no AI): %s | %s | %s",
+                    item.id,
+                    item.title,
+                    _fmt_price(item.price),
+                )
     else:
         for item in targets:
             await _judge_monitor_item(
@@ -157,10 +198,18 @@ async def scan_monitor(
 
     summary = (
         f"found={result.found}, candidates={result.candidates}, "
-        f"new={result.new}, matched={result.ai_matched}, "
+        f"new={result.new}, already_seen={result.already_seen}, "
+        f"matched={result.ai_matched}, "
         f"rejected={result.ai_rejected}, ignored={result.ignored}, "
         f"errors={result.ai_errors}"
     )
+    if result.found > 0 and result.candidates == 0:
+        # P1-2 fix: make the "everything was filtered out" case obvious
+        # instead of leaving the user with only a raw key=value dump.
+        summary += (
+            f"（找到 {result.found} 件，但全部被 Level 1 过滤："
+            "请检查关键词、价格范围或排除词）"
+        )
     db.set_last_scan(monitor.id, summary)
     log.info("Monitor %s (%s): %s", monitor.id, monitor.name, summary)
     return result

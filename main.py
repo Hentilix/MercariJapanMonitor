@@ -24,7 +24,7 @@ from nicegui import app, ui
 
 from app.database import Database, Monitor
 from app.deepseek import judge_item
-from app.email import make_match_notifier
+from app.email import ENV_KEYS, make_match_notifier
 from app.exchange_rate import format_price_pair, format_rate, get_jpy_cny_rate, rate_status
 from app.mercari import MercariClient
 from app.scanner import scan_monitor as run_monitor_scan
@@ -98,7 +98,12 @@ async def scan_monitor(monitor_id: int) -> None:
         return
 
     judge = None
-    if mon.ai_requirement and os.environ.get("DEEPSEEK_API_KEY_FOR_MJM"):
+    if mon.ai_requirement:
+        # P0-2 fix: the AI requirement itself decides whether a judge is
+        # needed. The DeepSeek key is checked inside judge_item() on every
+        # call — a missing key must surface as per-item AI errors (item
+        # stays unprocessed, retried next scan), never as a silent
+        # "match everything" fallback.
 
         async def judge_detail(detail):
             return await judge_item(ai_http, mon.ai_requirement, detail)
@@ -687,6 +692,29 @@ async def ignored_view() -> None:
 
 
 # ---------------------------------------------------------------- settings
+def smtp_status_text() -> str:
+    """Three-state SMTP config status, using the SAME 6 variables that
+    app.email actually requires (ENV_KEYS) — one source of truth."""
+    missing = [key for key in ENV_KEYS if not os.environ.get(key)]
+    if not missing:
+        return "SMTP：已配置"
+    if len(missing) == len(ENV_KEYS):
+        return "SMTP：未配置"
+    return "SMTP：配置不完整（缺：" + ", ".join(missing) + "）"
+
+
+def deepseek_status_text() -> str:
+    return (
+        "DeepSeek：已设置"
+        if os.environ.get("DEEPSEEK_API_KEY_FOR_MJM")
+        else "DeepSeek：未设置"
+    )
+
+
+def config_status_text() -> str:
+    return f"{deepseek_status_text()}    {smtp_status_text()}"
+
+
 def save_settings(
     key_input, host_input, port_input, user_input, pass_input,
     from_input, to_input,
@@ -717,12 +745,7 @@ def save_settings(
 
 @ui.refreshable
 def settings_status() -> None:
-    deepseek = "已设置" if os.environ.get("DEEPSEEK_API_KEY_FOR_MJM") else "未设置"
-    smtp = (
-        "已配置" if os.environ.get("SMTP_HOST") and os.environ.get("SMTP_PASSWORD")
-        else "未配置"
-    )
-    ui.label(f"DeepSeek Key: {deepseek} | SMTP: {smtp}").classes("text-sm text-gray-600")
+    ui.label(config_status_text()).classes("text-sm text-gray-600")
 
 
 # --------------------------------------------------------------------- page
@@ -741,6 +764,9 @@ async def index() -> None:
         ui.label("Mercari Japan Monitor").classes("text-3xl font-bold")
         ui.label("Scheduler: Running | 已启用任务按各自间隔自动扫描") \
             .classes("text-gray-500")
+        # P1-3: config availability visible without opening the settings
+        # expansion (same refreshable, refreshed together after saving).
+        settings_status()
 
         with ui.expansion("设置 (DeepSeek / SMTP)", icon="settings").classes("w-full"):
             with ui.column().classes("gap-2"):

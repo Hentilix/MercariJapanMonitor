@@ -19,8 +19,12 @@ class FakeClient:
         self._details = details or {}
         self._detail_errors = detail_errors or {}
         self.detail_calls = []  # (item_id, item_type)
+        self.queries = []  # every query string passed to search_products
+        self.searches = []  # every (query, kwargs) passed to search_products
 
     async def search_products(self, query, **kwargs):
+        self.queries.append(query)
+        self.searches.append((query, kwargs))
         if self._error is not None:
             raise self._error
         return list(self._items)
@@ -306,7 +310,10 @@ def test_zero_matches_never_notifies(tmp_path):
 
 # ------------------------------------------------------------------ filters
 def test_and_mode_requires_all_keywords(tmp_path):
-    db, mon = make_db(tmp_path, keywords="Built to Spill，CD", keyword_mode="AND")
+    db, mon = make_db(
+        tmp_path, keywords="Built to Spill，CD", keyword_mode="AND",
+        ai_requirement="",
+    )
     client = FakeClient(
         [
             make_item("1", "Built to Spill Keep It Like a Secret CD", 1200),
@@ -335,7 +342,7 @@ def test_or_mode_requires_any_keyword(tmp_path):
 
 
 def test_filter_words_case_insensitive(tmp_path):
-    db, mon = make_db(tmp_path, filter_words="LP, Vinyl")
+    db, mon = make_db(tmp_path, filter_words="LP, Vinyl", ai_requirement="")
     client = FakeClient(
         [
             make_item("1", "Built to Spill vinyl LP", 1200),
@@ -351,7 +358,7 @@ def test_filter_words_case_insensitive(tmp_path):
 
 
 def test_price_bounds(tmp_path):
-    db, mon = make_db(tmp_path, min_price=1000, max_price=5000)
+    db, mon = make_db(tmp_path, min_price=1000, max_price=5000, ai_requirement="")
     client = FakeClient(
         [
             make_item("1", "Built to Spill 1", 999),
@@ -369,7 +376,9 @@ def test_price_bounds(tmp_path):
 
 
 def test_price_only_min_or_only_max(tmp_path):
-    db, mon_min = make_db(tmp_path, name="min only", min_price=3000)
+    db, mon_min = make_db(
+        tmp_path, name="min only", min_price=3000, ai_requirement=""
+    )
     client = FakeClient(
         [make_item("lo", "Built to Spill lo", 1500), make_item("hi", "Built to Spill hi", 3000)]
     )
@@ -377,7 +386,9 @@ def test_price_only_min_or_only_max(tmp_path):
     assert result.candidates == 1
     assert db.has_monitor_product(mon_min.id, "hi")
 
-    db2, mon_max = make_db(tmp_path, name="max only", max_price=2000)
+    db2, mon_max = make_db(
+        tmp_path, name="max only", max_price=2000, ai_requirement=""
+    )
     result2 = run(scan_monitor(client, db2, mon_max))
     assert result2.candidates == 1
     assert db2.has_monitor_product(mon_max.id, "lo")
@@ -431,8 +442,14 @@ def test_last_scan_result_is_updated(tmp_path):
     mon = db.get_monitor(mon.id)
     assert mon.last_scan_at is not None
     assert "found=2" in mon.last_result
+    assert "candidates=2" in mon.last_result
+    assert "new=2" in mon.last_result
+    assert "already_seen=0" in mon.last_result
     assert "matched=1" in mon.last_result
     assert "rejected=1" in mon.last_result
+    assert "ignored=0" in mon.last_result
+    assert "errors=0" in mon.last_result
+    assert "全部被 Level 1 过滤" not in mon.last_result  # no hint when candidates>0
     db.close()
 
 
@@ -506,4 +523,220 @@ def test_ai_limit_leaves_rest_unprocessed(tmp_path):
     assert db.has_monitor_product(mon.id, "0")
     assert db.has_monitor_product(mon.id, "1")
     assert not db.has_monitor_product(mon.id, "2")  # beyond the limit
+    db.close()
+
+
+# ------------------------------------------- P0-1: Mercari query construction
+def test_query_sent_to_mercari_is_space_joined_keywords(tmp_path):
+    """The query sent to Mercari is the space-joined keywords — the raw
+    string with Chinese commas must never go to the API (P0-1)."""
+    db, mon = make_db(
+        tmp_path, keywords="Waltz For Debby，Bill Evans", ai_requirement=""
+    )
+    client = FakeClient([make_item("1", "Waltz For Debby Bill Evans CD", 1200)])
+    run(scan_monitor(client, db, mon))
+    assert client.queries == ["Waltz For Debby Bill Evans"]
+    db.close()
+
+
+def test_query_sent_to_mercari_joins_ascii_commas_too(tmp_path):
+    db, mon = make_db(tmp_path, keywords="Built to Spill, CD", ai_requirement="")
+    client = FakeClient([make_item("1", "Built to Spill CD", 1200)])
+    run(scan_monitor(client, db, mon))
+    assert client.queries == ["Built to Spill CD"]
+    db.close()
+
+
+def test_level1_keeps_split_keywords_not_joined_phrase(tmp_path):
+    """Level 1 still uses the comma-split keywords: a title containing both
+    words but NOT the contiguous joined phrase passes AND mode, while a
+    title with only one keyword fails (P0-1)."""
+    db, mon = make_db(
+        tmp_path, keywords="Waltz For Debby，Bill Evans", ai_requirement=""
+    )
+    client = FakeClient(
+        [
+            make_item("1", "Bill Evans trio plays Waltz For Debby", 1200),
+            make_item("2", "Waltz For Debby CD", 1200),
+        ]
+    )
+    result = run(scan_monitor(client, db, mon))
+    assert result.candidates == 1
+    assert db.has_monitor_product(mon.id, "1")
+    assert not db.has_monitor_product(mon.id, "2")
+    db.close()
+
+
+def test_or_mode_split_keywords_pass_independently(tmp_path):
+    db, mon = make_db(
+        tmp_path,
+        keywords="Waltz For Debby，Bill Evans",
+        keyword_mode="OR",
+        ai_requirement="",
+    )
+    client = FakeClient(
+        [
+            make_item("1", "Waltz For Debby CD", 1200),
+            make_item("2", "Bill Evans CD", 1200),
+            make_item("3", "Radiohead CD", 1200),
+        ]
+    )
+    result = run(scan_monitor(client, db, mon))
+    assert result.candidates == 2
+    assert db.has_monitor_product(mon.id, "1")
+    assert db.has_monitor_product(mon.id, "2")
+    db.close()
+
+
+# ------------------------------------- P0-2: AI required + judge unavailable
+def test_judge_none_with_ai_requirement_matches_nothing(tmp_path):
+    """P0-2: when a monitor requires AI but no judge is available, nothing
+    is matched, nothing is recorded, nothing is emailed — and the items are
+    still new on the next scan (retried)."""
+    db, mon = make_db(tmp_path, ai_requirement="必须是全新正版日版 CD，带 OBI")
+    client = FakeClient(
+        [
+            make_item("1", "Built to Spill 1 CD", 1200),
+            make_item("2", "Built to Spill 2 CD", 1200),
+        ]
+    )
+    batches = []
+    result = run(
+        scan_monitor(client, db, mon, judge=None, notifier=make_notifier(batches))
+    )
+    assert result.ai_matched == 0
+    assert result.ai_rejected == 0
+    assert result.ai_errors == 2
+    assert batches == []  # no email without a verdict
+    assert not db.has_monitor_product(mon.id, "1")
+    assert not db.has_monitor_product(mon.id, "2")
+
+    # A later scan with a working judge processes them normally.
+    client2 = FakeClient(
+        [make_item("1", "Built to Spill 1 CD", 1200)],
+        details={"1": make_detail()},
+    )
+    calls = []
+    second = run(scan_monitor(client2, db, mon, judge=fake_judge([True], calls)))
+    assert second.new == 1
+    assert second.ai_matched == 1
+    assert db.has_monitor_product(mon.id, "1")
+    db.close()
+
+
+# ------------------------------- P1-1: price/exclude pushed to Mercari search
+def test_price_range_is_forwarded_to_search(tmp_path):
+    db, mon = make_db(tmp_path, min_price=None, max_price=2000, ai_requirement="")
+    client = FakeClient([make_item("1", "Built to Spill CD", 1200)])
+    run(scan_monitor(client, db, mon))
+    _, kwargs = client.searches[0]
+    assert kwargs["min_price"] is None
+    assert kwargs["max_price"] == 2000
+    db.close()
+
+
+def test_min_price_zero_is_forwarded_not_dropped(tmp_path):
+    db, mon = make_db(tmp_path, min_price=0, max_price=2000, ai_requirement="")
+    client = FakeClient([make_item("1", "Built to Spill CD", 1200)])
+    run(scan_monitor(client, db, mon))
+    _, kwargs = client.searches[0]
+    assert kwargs["min_price"] == 0  # 0 is a legal price, never None
+    assert kwargs["max_price"] == 2000
+    db.close()
+
+
+def test_exclude_words_are_split_joined_and_forwarded(tmp_path):
+    """filter_words "LP，DVD, Blu-ray" -> search exclude "LP DVD Blu-ray":
+    both comma styles split, blanks are stripped, empty words dropped, and
+    the single-string excludeKeyword gets the space-joined words."""
+    db, mon = make_db(tmp_path, filter_words="LP，DVD, Blu-ray", ai_requirement="")
+    client = FakeClient([make_item("1", "Built to Spill CD", 1200)])
+    run(scan_monitor(client, db, mon))
+    _, kwargs = client.searches[0]
+    assert kwargs["exclude"] == "LP DVD Blu-ray"
+    db.close()
+
+
+def test_no_price_limits_forward_none(tmp_path):
+    db, mon = make_db(tmp_path, ai_requirement="")
+    client = FakeClient([make_item("1", "Built to Spill CD", 1200)])
+    run(scan_monitor(client, db, mon))
+    _, kwargs = client.searches[0]
+    assert kwargs["min_price"] is None
+    assert kwargs["max_price"] is None
+    db.close()
+
+
+def test_local_level1_still_filters_after_server_pushdown(tmp_path):
+    """Server-side filters only improve the result window; the local
+    FilterRule stays the final authority (exclude + price both re-checked)."""
+    db, mon = make_db(
+        tmp_path,
+        filter_words="LP，DVD",
+        min_price=None,
+        max_price=2000,
+        ai_requirement="",
+    )
+    client = FakeClient(
+        [
+            make_item("1", "Built to Spill CD", 1200),       # passes
+            make_item("2", "Built to Spill DVD box", 1500),  # exclude hit
+            make_item("3", "Built to Spill CD box", 2500),   # price over
+        ]
+    )
+    result = run(scan_monitor(client, db, mon))
+    assert result.candidates == 1
+    assert db.has_monitor_product(mon.id, "1")
+    assert not db.has_monitor_product(mon.id, "2")
+    assert not db.has_monitor_product(mon.id, "3")
+    db.close()
+
+
+# ------------------------------------------- P1-2: found>0 but candidates==0
+def test_zero_candidates_summary_explains_level1_filtering(tmp_path):
+    """When the search found items but Level 1 filters ALL of them out,
+    the saved last_result explains it (found/candidates/already_seen +
+    a human-readable hint), nothing is recorded and nothing is emailed."""
+    db, mon = make_db(tmp_path, max_price=2000, ai_requirement="")
+    client = FakeClient(
+        [
+            make_item("1", "Built to Spill 1 CD", 2500),  # price over
+            make_item("2", "Built to Spill 2 CD", 3000),  # price over
+            make_item("3", "Built to Spill 3 CD", 4000),  # price over
+        ]
+    )
+    batches = []
+    result = run(scan_monitor(client, db, mon, notifier=make_notifier(batches)))
+
+    assert result.found > 0
+    assert result.candidates == 0
+    assert result.new == 0
+    assert result.already_seen == 0
+    assert result.ignored == 0
+    assert result.ai_matched == 0
+    assert batches == []  # no email
+    assert len(db.list_monitor_products(mon.id)) == 0  # nothing recorded
+
+    last = db.get_monitor(mon.id).last_result
+    assert "found=3" in last
+    assert "candidates=0" in last
+    assert "new=0" in last
+    assert "already_seen=0" in last
+    assert "matched=0" in last
+    assert "rejected=0" in last
+    assert "ignored=0" in last
+    assert "errors=0" in last
+    assert "找到" in last
+    assert "全部被 Level 1 过滤" in last
+    db.close()
+
+
+def test_zero_found_summary_has_no_level1_hint(tmp_path):
+    """found=0 must NOT get the Level 1 hint (nothing was filtered)."""
+    db, mon = make_db(tmp_path, ai_requirement="")
+    client = FakeClient([])
+    run(scan_monitor(client, db, mon))
+    last = db.get_monitor(mon.id).last_result
+    assert "found=0" in last
+    assert "全部被 Level 1 过滤" not in last
     db.close()

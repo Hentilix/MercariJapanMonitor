@@ -200,7 +200,7 @@ CREATE TABLE ignored_products (
 - **关键词匹配模式（`match_mode`）**：
   - `AND`（默认）：标题必须包含**每一个**关键词
   - `OR`：标题包含**任意一个**关键词即可
-- **关键词用中文逗号 `，` 分割**（英文逗号也兼容）：例如搜索关键词填 `John Coltrane，A Love Supreme，CD` 会拆成 3 个关键词参与 Level 1 匹配；发送给 Mercari 的搜索串仍为原始输入
+- **关键词用中文逗号 `，` 分割**（英文逗号也兼容）：例如搜索关键词填 `John Coltrane，A Love Supreme，CD` 会拆成 3 个关键词参与 Level 1 匹配；发送给 Mercari 的搜索串为关键词的**空格拼接**（`John Coltrane A Love Supreme CD`，P0-1 修复——原始串中的逗号会严重压低召回）
 - `exclude_keywords` 优先于 `keywords`，且始终为"任一命中即排除"（与 `match_mode` 无关），同样用中文逗号分割
 - 匹配为大小写不敏感（casefold）的**子串匹配**
 - 价格边界含端点（`min <= price <= max`）
