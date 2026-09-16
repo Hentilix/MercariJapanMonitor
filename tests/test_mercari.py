@@ -79,15 +79,21 @@ def test_regular_item_uses_item_then_fallback(monkeypatch):
     ]
 
 
-def test_unknown_type_keeps_strict_item_behavior(monkeypatch):
+def test_unknown_type_uses_item_with_keyerror_fallback(monkeypatch):
+    """KeyError from items/get no longer crashes the scan: the Shops API is
+    tried and, when it has nothing, the item counts as unavailable (retried
+    next scan) — the same fallback regular items already had for None."""
     fake = FakeMercapi(item_error=KeyError("data"), product_result=None)
     client = make_client(monkeypatch, fake)
     try:
-        with pytest.raises(MercariError):
-            run(client.get_item_details("2JWGvFpEzgTBTpivj2GB9A", None))
+        result = run(client.get_item_details("2JWGvFpEzgTBTpivj2GB9A", None))
     finally:
         run(client.close())
-    assert fake.calls == [("item", "2JWGvFpEzgTBTpivj2GB9A")]
+    assert result is None
+    assert fake.calls == [
+        ("item", "2JWGvFpEzgTBTpivj2GB9A"),
+        ("product", "2JWGvFpEzgTBTpivj2GB9A"),
+    ]
 
 
 def test_beyond_product_error_is_wrapped(monkeypatch):
@@ -172,3 +178,33 @@ def test_product_detail_falls_back_to_id_when_no_display_name():
     assert detail.title == "2JWGvFpEzgTBTpivj2GB9A"
     assert detail.condition is None
     assert detail.category is None
+
+
+# -------------------------------------- items/get without "data" (KeyError)
+def test_item_keyerror_with_no_shops_listing_returns_none(monkeypatch):
+    """A transient items/get response without 'data' must not crash the scan:
+    try the Shops API, then treat as unavailable (retried next scan)."""
+    fake = FakeMercapi(item_error=KeyError("data"), product_result=None)
+    client = make_client(monkeypatch, fake)
+    try:
+        result = run(client.get_item_details("m96352361528"))
+    finally:
+        run(client.close())
+    assert result is None
+    assert fake.calls == [("item", "m96352361528"), ("product", "m96352361528")]
+
+
+def test_item_keyerror_uses_shops_listing_when_available(monkeypatch):
+    """The same KeyError with an existing Shops product returns its detail."""
+    fake = FakeMercapi(
+        item_error=KeyError("data"),
+        product_result=make_product(display_name="Shops CD"),
+    )
+    client = make_client(monkeypatch, fake)
+    try:
+        detail = run(client.get_item_details("m96352361528"))
+    finally:
+        run(client.close())
+    assert detail is not None
+    assert detail.title == "Shops CD"
+    assert fake.calls == [("item", "m96352361528"), ("product", "m96352361528")]

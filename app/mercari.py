@@ -4,6 +4,7 @@ Fetch-only. Level 1 filtering lives in app.filter, not here.
 """
 
 from dataclasses import dataclass
+import logging
 from typing import Optional
 
 import httpx
@@ -11,6 +12,8 @@ from mercapi import Mercapi
 from mercapi.models import Item
 from mercapi.models.product import Product
 from mercapi.requests import SearchRequestData
+
+log = logging.getLogger(__name__)
 
 ITEM_URL_BASE = "https://jp.mercari.com/item/"
 SHOP_URL_BASE = "https://jp.mercari.com/shops/product/"
@@ -183,6 +186,21 @@ class MercariClient:
             if full is None:
                 # Not a regular item (or sold) — try the Mercari Shops API.
                 full = await self._mercapi.product(item_id)
+        except KeyError:
+            # items/get answered without a "data" key: either a transient
+            # error response (rate limit / interrupted request — the next
+            # scan retries) or a Shops listing mislabeled as
+            # ITEM_TYPE_MERCARI. Try the Shops API; when it has nothing
+            # either, treat the item as temporarily unavailable instead of
+            # failing the whole scan with a hard error.
+            log.warning(
+                "items/get returned no 'data' for %s — trying the Shops API",
+                item_id,
+            )
+            try:
+                full = await self._mercapi.product(item_id)
+            except Exception:
+                full = None
         except Exception as exc:
             raise MercariError(
                 f"Mercari item fetch failed: {type(exc).__name__}: {exc}"
