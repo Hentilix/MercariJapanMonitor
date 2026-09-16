@@ -219,3 +219,37 @@ def test_config_status_line_combines_both(clean_config_env, monkeypatch):
     text = config_status_text()
     assert "DeepSeek：已设置" in text
     assert "SMTP：未配置" in text
+
+
+# ------------------------------------------- mercapi 可选字段警告过滤
+def test_mercapi_optional_field_warning_is_filtered():
+    import logging
+
+    from main import _MercapiOptionalFieldFilter
+
+    log_filter = _MercapiOptionalFieldFilter()
+    record = logging.LogRecord(
+        "root", logging.WARNING, __file__, 1,
+        "Encountered optional response property brand that could not be parsed correctly.",
+        None, None,
+    )
+    assert log_filter.filter(record) is False
+
+
+def test_other_log_records_pass_the_filter():
+    import logging
+
+    from main import _MercapiOptionalFieldFilter
+
+    log_filter = _MercapiOptionalFieldFilter()
+    record = logging.LogRecord(
+        "root", logging.INFO, __file__, 1, "Monitor 1 扫描完成", None, None
+    )
+    assert log_filter.filter(record) is True
+
+
+# ------------------------------------------- 历史页过滤选项 (方案 A)
+def test_history_filter_values_mapping():
+    from main import HISTORY_FILTER_VALUES
+
+    assert HISTORY_FILTER_VALUES == {"matched": 1, "rejected": 0, "all": None}

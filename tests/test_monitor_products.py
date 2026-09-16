@@ -29,6 +29,29 @@ def test_add_and_list_monitor_product(tmp_path):
     db.close()
 
 
+def test_list_products_matched_filter(tmp_path):
+    """matched=1 default / matched=0 rejected-only / matched=None both."""
+    db, (a_id, _) = make_db(tmp_path)
+    db.add_monitor_product(a_id, mercari_id="m1", title="match", price=1, url="u1", matched=True)
+    db.add_monitor_product(a_id, mercari_id="m2", title="reject", price=2, url="u2", matched=False)
+
+    assert {r[0] for r in db.list_monitor_products(a_id)} == {"m1"}
+    assert {r[0] for r in db.list_monitor_products(a_id, matched=0)} == {"m2"}
+    assert {r[0] for r in db.list_monitor_products(a_id, matched=None)} == {"m1", "m2"}
+    db.close()
+
+
+def test_count_products_matched_filter(tmp_path):
+    db, (a_id, _) = make_db(tmp_path)
+    db.add_monitor_product(a_id, mercari_id="m1", title="match", price=1, url="u1", matched=True)
+    db.add_monitor_product(a_id, mercari_id="m2", title="reject", price=2, url="u2", matched=False)
+
+    assert db.count_monitor_products(a_id) == 1
+    assert db.count_monitor_products(a_id, matched=0) == 1
+    assert db.count_monitor_products(a_id, matched=None) == 2
+    db.close()
+
+
 def test_published_at_may_be_null(tmp_path):
     db, (a_id, _) = make_db(tmp_path)
     db.add_monitor_product(

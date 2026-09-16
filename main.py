@@ -63,6 +63,21 @@ SMTP_DEFAULTS = {
 }
 
 
+class _MercapiOptionalFieldFilter(logging.Filter):
+    """Drop mercapi's "optional response property ... could not be parsed"
+    warnings.
+
+    They fire when an OPTIONAL API field is null/missing (verified live:
+    e.g. Shops products with "brand": null). Those fields (brand,
+    productStats) are not used by this project — the fields we do use
+    (title/description/condition/category) parse fine — so the warning is
+    pure console noise.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return "Encountered optional response property" not in record.getMessage()
+
+
 def setup_logging() -> None:
     handlers: list[logging.Handler] = [logging.StreamHandler(sys.stdout)]
     try:
@@ -82,6 +97,7 @@ def setup_logging() -> None:
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
         handlers=handlers,
     )
+    logging.getLogger().addFilter(_MercapiOptionalFieldFilter())
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("httpcore").setLevel(logging.WARNING)
 
@@ -399,7 +415,20 @@ HISTORY_SORT_OPTIONS = {
 
 HISTORY_PAGE_SIZE = 20
 
-_history_state = {"monitor_id": None, "page": 1, "sort_by": "published_desc"}
+# Phase P1-followup: history view can show matched / rejected / all rows.
+HISTORY_FILTER_OPTIONS = {
+    "matched": "仅显示匹配商品",
+    "rejected": "仅显示被拒绝商品",
+    "all": "显示全部（匹配 + 被拒绝）",
+}
+HISTORY_FILTER_VALUES = {"matched": 1, "rejected": 0, "all": None}
+
+_history_state = {
+    "monitor_id": None,
+    "page": 1,
+    "sort_by": "published_desc",
+    "filter": "matched",
+}
 _ignored_state = {"page": 1}
 _product_delete_state = {"monitor_id": None, "mercari_id": None}
 _ignore_state = {"monitor_id": None, "mercari_id": None}
@@ -459,6 +488,12 @@ def _on_ignored_monitor_changed(monitor_id: int) -> None:
 def _on_history_sort_changed(sort_by: str) -> None:
     _history_state["sort_by"] = sort_by
     _history_state["page"] = 1  # a new ordering restarts at page 1
+    history_view.refresh()
+
+
+def _on_history_filter_changed(value: str) -> None:
+    _history_state["filter"] = value
+    _history_state["page"] = 1  # a new filter restarts at page 1
     history_view.refresh()
 
 
@@ -574,9 +609,20 @@ async def history_view() -> None:
             label="排序",
             on_change=lambda e: _on_history_sort_changed(str(e.value)),
         ).props("dense")
+        ui.select(
+            HISTORY_FILTER_OPTIONS,
+            value=state["filter"],
+            label="显示",
+            on_change=lambda e: _on_history_filter_changed(str(e.value)),
+        ).props("dense")
     ui.label(_rate_banner_text(rate)).classes("text-xs text-gray-500")
 
-    total = db.count_monitor_products(monitor.id)
+    matched_value = HISTORY_FILTER_VALUES.get(state["filter"], 1)
+    if state["filter"] != "matched":
+        ui.label("被拒绝的商品不会发送邮件，也不会被再次判定。") \
+            .classes("text-xs text-amber-600")
+
+    total = db.count_monitor_products(monitor.id, matched=matched_value)
     total_pages = calculate_total_pages(total, HISTORY_PAGE_SIZE)
     state["page"] = clamp_page(state["page"], total_pages)  # delete 边界自动回退
     offset = (state["page"] - 1) * HISTORY_PAGE_SIZE
@@ -585,10 +631,16 @@ async def history_view() -> None:
         sort_by=state["sort_by"],
         limit=HISTORY_PAGE_SIZE,
         offset=offset,
+        matched=matched_value,
     )
 
+    empty_texts = {
+        "matched": "暂无匹配商品",
+        "rejected": "暂无被拒绝商品",
+        "all": "暂无商品",
+    }
     if not rows:
-        ui.label("暂无匹配商品").classes("text-gray-500")
+        ui.label(empty_texts.get(state["filter"], "暂无商品")).classes("text-gray-500")
     else:
         for mercari_id, title, price, url, published_at, _found_at in rows:
             with ui.row().classes("items-center w-full no-wrap"):

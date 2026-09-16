@@ -431,10 +431,15 @@ class Database:
         sort_by: str = "published_desc",
         limit: int = 20,
         offset: int = 0,
+        matched: int | None = 1,
     ) -> list[tuple]:
-        """History page: only matched (DeepSeek true) items for one monitor.
+        """History page rows for one monitor.
 
         (mercari_id, title, price, url, published_at, found_at)
+
+        matched=1 -> only DeepSeek-true items (default, the visible
+        history); matched=0 -> only processed-but-rejected items;
+        matched=None -> both.
 
         sort_by must be one of PRODUCT_SORT_OPTIONS; anything else falls
         back to published_desc. NULL prices/timestamps sort last so they
@@ -446,18 +451,28 @@ class Database:
             limit = 20
         if offset < 0:
             offset = 0
+        if matched is None:
+            where, args = "monitor_id=?", (monitor_id,)
+        else:
+            where, args = "monitor_id=? AND matched=?", (monitor_id, int(matched))
         return self._conn.execute(
             f"SELECT mercari_id, title, price, url, published_at, found_at "
-            f"FROM monitor_products WHERE monitor_id=? AND matched=1 "
+            f"FROM monitor_products WHERE {where} "
             f"ORDER BY {order_clause} LIMIT ? OFFSET ?",
-            (monitor_id, limit, offset),
+            (*args, limit, offset),
         ).fetchall()
 
-    def count_monitor_products(self, monitor_id: int) -> int:
-        """Number of matched (history) items for one monitor."""
+    def count_monitor_products(
+        self, monitor_id: int, matched: int | None = 1
+    ) -> int:
+        """Number of history rows for one monitor (matched filter like
+        list_monitor_products: 1 / 0 / None=both)."""
+        if matched is None:
+            where, args = "monitor_id=?", (monitor_id,)
+        else:
+            where, args = "monitor_id=? AND matched=?", (monitor_id, int(matched))
         row = self._conn.execute(
-            "SELECT COUNT(*) FROM monitor_products WHERE monitor_id=? AND matched=1",
-            (monitor_id,),
+            f"SELECT COUNT(*) FROM monitor_products WHERE {where}", args
         ).fetchone()
         return row[0]
 
