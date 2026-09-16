@@ -740,3 +740,47 @@ def test_zero_found_summary_has_no_level1_hint(tmp_path):
     assert "found=0" in last
     assert "全部被 Level 1 过滤" not in last
     db.close()
+
+
+# ------------------------------- P0-1 follow-up: OR mode per-keyword search
+def test_or_mode_searches_each_keyword_separately(tmp_path):
+    """OR mode must send ONE query per keyword (Mercari treats a joined
+    multi-word query as ~AND and returns zero results — verified live)."""
+    db, mon = make_db(
+        tmp_path,
+        keywords="Waltz For Debby，Bill Evans",
+        keyword_mode="OR",
+        ai_requirement="",
+    )
+    client = FakeClient(
+        [
+            make_item("X", "Waltz For Debby CD", 1200),
+            make_item("Y", "Bill Evans Trio CD", 1200),
+        ]
+    )
+    result = run(scan_monitor(client, db, mon))
+    assert client.queries == ["Waltz For Debby", "Bill Evans"]
+    assert result.found == 2
+    assert result.candidates == 2
+    assert db.has_monitor_product(mon.id, "X")
+    assert db.has_monitor_product(mon.id, "Y")
+    db.close()
+
+
+def test_or_mode_dedupes_items_seen_in_multiple_keyword_searches(tmp_path):
+    """The same item returned by several per-keyword searches is processed
+    exactly once (found/candidates/matched all deduplicated)."""
+    db, mon = make_db(
+        tmp_path,
+        keywords="Kanye West，College Dropout",
+        keyword_mode="OR",
+        ai_requirement="",
+    )
+    client = FakeClient([make_item("X", "Kanye West College Dropout CD", 1200)])
+    result = run(scan_monitor(client, db, mon))
+    assert client.queries == ["Kanye West", "College Dropout"]
+    assert result.found == 1
+    assert result.candidates == 1
+    assert result.ai_matched == 1
+    assert len(db.list_monitor_products(mon.id)) == 1
+    db.close()

@@ -86,13 +86,6 @@ async def scan_monitor(
         match_mode=monitor.keyword_mode,
     )
 
-    # P0-1 fix: the Mercari query is the SPACE-JOINED keywords. The raw
-    # string (with Chinese commas) went to Mercari verbatim and crushed
-    # recall (verified live: "Waltz For Debby，Bill Evans" -> 15 results,
-    # "Waltz For Debby Bill Evans" -> 242). Level 1 keeps the comma-split
-    # keyword list above — never the joined phrase.
-    search_query = " ".join(keywords)
-
     # P1-1 fix: push the monitor's price range and exclude words into the
     # Mercari search itself, so the first pages are not wasted on items the
     # local Level 1 would reject anyway. mercapi 0.5.0 accepts ONE exclude
@@ -101,13 +94,42 @@ async def scan_monitor(
     search_exclude = " ".join(exclude_words) or None
 
     try:
-        products = await client.search_products(
-            search_query,
-            min_price=monitor.min_price,
-            max_price=monitor.max_price,
-            exclude=search_exclude,
-            max_pages=max_pages,
-        )
+        if monitor.keyword_mode.upper() == "OR":
+            # P0-1 follow-up: OR mode must NOT space-join all keywords into
+            # one query — Mercari treats a joined multi-word query as ~AND
+            # and returns zero results for OR monitors (verified live:
+            # 4 joined words -> num_found=0 vs 1461/40/1573 per single
+            # keyword). Search each keyword separately and merge with
+            # id-deduplication; local Level 1 keeps the final OR decision.
+            products: list[SearchItem] = []
+            seen: set[str] = set()
+            for kw in keywords:
+                batch = await client.search_products(
+                    kw,
+                    min_price=monitor.min_price,
+                    max_price=monitor.max_price,
+                    exclude=search_exclude,
+                    max_pages=max_pages,
+                )
+                for item in batch:
+                    if item.id not in seen:
+                        seen.add(item.id)
+                        products.append(item)
+        else:
+            # P0-1 fix: the Mercari query is the SPACE-JOINED keywords
+            # (AND mode: every keyword should match). The raw string (with
+            # Chinese commas) went to Mercari verbatim and crushed recall
+            # (verified live: "Waltz For Debby，Bill Evans" -> 15 results,
+            # "Waltz For Debby Bill Evans" -> 242). Level 1 keeps the
+            # comma-split keyword list above — never the joined phrase.
+            search_query = " ".join(keywords)
+            products = await client.search_products(
+                search_query,
+                min_price=monitor.min_price,
+                max_price=monitor.max_price,
+                exclude=search_exclude,
+                max_pages=max_pages,
+            )
     except MercariError as exc:
         db.set_last_scan(
             monitor.id, f"搜索失败: {type(exc).__name__}: {exc}"
