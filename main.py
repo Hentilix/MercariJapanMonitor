@@ -190,7 +190,10 @@ async def toggle_enabled(mon: Monitor, enabled: bool) -> None:
     db.set_monitor_enabled(mon.id, enabled)
     updated = db.get_monitor(mon.id)
     if enabled:
-        await scheduler.enable_monitor(updated)  # schedule + immediate scan
+        # Same as save_monitor: fire-and-forget the immediate scan instead
+        # of awaiting it in the UI handler (long scans can outlive the
+        # handler's UI slot -> notify RuntimeError).
+        asyncio.create_task(scheduler.enable_monitor(updated))
     else:
         scheduler.disable_monitor(mon.id)
     monitors_view.refresh()
@@ -387,13 +390,18 @@ async def save_monitor() -> None:
             new_id = db.create_monitor(**fields)
             created = db.get_monitor(new_id)
             if created and created.enabled:
-                await scheduler.enable_monitor(created)  # schedule + immediate scan
+                # Don't await the full scan inside this UI handler: a slow
+                # scan (timeouts/retries) keeps the handler alive, and when
+                # the page/dialog is rebuilt meanwhile the UI slot gets
+                # deleted -> ui.notify raises RuntimeError. The scan still
+                # starts immediately, in the background.
+                asyncio.create_task(scheduler.enable_monitor(created))
             ui.notify(f"已创建任务「{fields['name']}」")
         else:
             db.update_monitor(editing_id, **fields)
             updated = db.get_monitor(editing_id)
             if updated and updated.enabled:
-                await scheduler.enable_monitor(updated)  # reschedule + scan now
+                asyncio.create_task(scheduler.enable_monitor(updated))
             else:
                 scheduler.disable_monitor(editing_id)
             ui.notify(f"已保存任务「{fields['name']}」")

@@ -4,6 +4,7 @@ Fetch-only. Level 1 filtering lives in app.filter, not here.
 """
 
 from dataclasses import dataclass
+import asyncio
 import logging
 from typing import Optional
 
@@ -17,6 +18,31 @@ log = logging.getLogger(__name__)
 
 ITEM_URL_BASE = "https://jp.mercari.com/item/"
 SHOP_URL_BASE = "https://jp.mercari.com/shops/product/"
+
+# Small retry chain for transient network failures (timeouts, resets).
+# TLS/SSL verification errors are deliberately NOT retried: retrying can
+# never fix a rejected certificate.
+RETRY_DELAYS = (2.0, 4.0)  # seconds before 2nd / 3rd attempt
+
+
+def _is_transient_network_error(exc: Exception) -> bool:
+    """True for failures a short retry can plausibly fix."""
+    if isinstance(
+        exc,
+        (
+            httpx.ConnectTimeout,
+            httpx.ReadTimeout,
+            httpx.WriteTimeout,
+            httpx.RemoteProtocolError,
+        ),
+    ):
+        return True
+    if isinstance(exc, httpx.ConnectError):
+        text = str(exc)
+        return not any(
+            marker in text for marker in ("SSL", "TLS", "certificate", "CERTIFICATE")
+        )
+    return False
 
 
 class MercariError(Exception):
@@ -140,19 +166,33 @@ class MercariClient:
         items: list[SearchItem] = []
         page_token: Optional[str] = None
         for _ in range(max_pages):
-            try:
-                results = await self._mercapi.search(
-                    query,
-                    price_min=min_price,
-                    price_max=max_price,
-                    exclude=exclude,
-                    status=[SearchRequestData.Status.STATUS_ON_SALE],
-                    page_token=page_token,
-                )
-            except Exception as exc:
-                raise MercariError(
-                    f"Mercari search failed: {type(exc).__name__}: {exc}"
-                ) from exc
+            results = None
+            for attempt in range(len(RETRY_DELAYS) + 1):
+                if attempt:
+                    await asyncio.sleep(RETRY_DELAYS[attempt - 1])
+                try:
+                    results = await self._mercapi.search(
+                        query,
+                        price_min=min_price,
+                        price_max=max_price,
+                        exclude=exclude,
+                        status=[SearchRequestData.Status.STATUS_ON_SALE],
+                        page_token=page_token,
+                    )
+                    break
+                except Exception as exc:
+                    retryable = _is_transient_network_error(exc)
+                    if not retryable or attempt == len(RETRY_DELAYS):
+                        raise MercariError(
+                            f"Mercari search failed: {type(exc).__name__}: {exc}"
+                        ) from exc
+                    log.warning(
+                        "Mercari search attempt %d/%d failed (%s) — retrying in %.0fs",
+                        attempt + 1,
+                        len(RETRY_DELAYS) + 1,
+                        type(exc).__name__,
+                        RETRY_DELAYS[attempt - 1],
+                    )
             items.extend(_to_search_item(item) for item in results.items)
             page_token = results.meta.next_page_token
             if not page_token:

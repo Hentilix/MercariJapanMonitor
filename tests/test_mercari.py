@@ -6,10 +6,13 @@ items/get REJECTS Mercari Shops product ids with HTTP 400 (JSON without a
 """
 
 import asyncio
+from types import SimpleNamespace
 
+import httpx
 import pytest
 
-from app.mercari import MercariClient, MercariError
+import app.mercari as mercari_module
+from app.mercari import MercariClient, MercariError, _is_transient_network_error
 
 
 class FakeMercapi:
@@ -208,3 +211,93 @@ def test_item_keyerror_uses_shops_listing_when_available(monkeypatch):
     assert detail is not None
     assert detail.title == "Shops CD"
     assert fake.calls == [("item", "m96352361528"), ("product", "m96352361528")]
+
+
+# ------------------------------------------- retry on transient network errors
+def test_transient_network_error_classification():
+    assert _is_transient_network_error(httpx.ConnectTimeout("boom")) is True
+    assert _is_transient_network_error(httpx.ReadTimeout("boom")) is True
+    assert _is_transient_network_error(httpx.RemoteProtocolError("boom")) is True
+    assert _is_transient_network_error(httpx.ConnectError("Connection reset by peer")) is True
+    assert _is_transient_network_error(
+        httpx.ConnectError("[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed")
+    ) is False
+    assert _is_transient_network_error(ValueError("boom")) is False
+
+
+class _FakeSearchRaw:
+    def __init__(self, id_):
+        self.id_ = id_
+        self.name = f"item {id_}"
+        self.real_price = 1000
+        self.item_type = "ITEM_TYPE_MERCARI"
+        self.created = None
+
+
+def _fake_results(items):
+    return SimpleNamespace(items=items, meta=SimpleNamespace(next_page_token=None))
+
+
+def _spy_mercapi_search(monkeypatch, client, behavior):
+    calls = []
+
+    async def fake_search(query, **kwargs):
+        calls.append(query)
+        result = behavior(len(calls))
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+    monkeypatch.setattr(client._mercapi, "search", fake_search)
+    return calls
+
+
+def test_search_retries_transient_errors_then_succeeds(monkeypatch):
+    monkeypatch.setattr(mercari_module, "RETRY_DELAYS", (0.0, 0.0))
+    client = MercariClient()
+    results = _fake_results([_FakeSearchRaw("m1")])
+
+    def behavior(n):
+        return httpx.ConnectTimeout("timed out") if n < 3 else results
+
+    calls = _spy_mercapi_search(monkeypatch, client, behavior)
+    try:
+        items = run(client.search_products("q"))
+    finally:
+        run(client.close())
+    assert len(calls) == 3
+    assert [i.id for i in items] == ["m1"]
+
+
+def test_search_gives_up_after_retries(monkeypatch):
+    monkeypatch.setattr(mercari_module, "RETRY_DELAYS", (0.0, 0.0))
+    client = MercariClient()
+
+    def behavior(n):
+        return httpx.ConnectTimeout("timed out")
+
+    calls = _spy_mercapi_search(monkeypatch, client, behavior)
+    try:
+        with pytest.raises(MercariError):
+            run(client.search_products("q"))
+    finally:
+        run(client.close())
+    assert len(calls) == 3  # 1 + 2 retries
+
+
+def test_search_ssl_error_is_not_retried(monkeypatch):
+    monkeypatch.setattr(mercari_module, "RETRY_DELAYS", (0.0, 0.0))
+    client = MercariClient()
+
+    def behavior(n):
+        return httpx.ConnectError(
+            "[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed"
+        )
+
+    calls = _spy_mercapi_search(monkeypatch, client, behavior)
+    try:
+        with pytest.raises(MercariError):
+            run(client.search_products("q"))
+    finally:
+        run(client.close())
+    assert len(calls) == 1  # retrying cannot fix a rejected certificate
