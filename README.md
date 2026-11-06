@@ -680,15 +680,16 @@ GUI 只是管理界面。
 
 ---
 
-## 单实例保护
+## 单实例保护（Windows / Ubuntu）
 
-程序启动时会创建：
+程序启动时会在系统临时目录（由 `tempfile.gettempdir()` 确定）获取一个真实的 OS 文件锁，通常位于：
 
 ```text
-%TEMP%\marketplace_monitor.lock
+Windows：%TEMP%\marketplace_monitor.lock
+Ubuntu：/tmp/marketplace_monitor.lock
 ```
 
-作为 OS 文件锁。
+Windows 使用 `msvcrt.locking` 独占字节锁，Ubuntu 等 POSIX 系统使用 `fcntl.flock` 非阻塞独占锁，无需额外依赖，非 PID 文件猜测。
 
 如果已有实例正在运行：
 
@@ -710,7 +711,7 @@ GUI 只是管理界面。
 
 因此不会产生重复调度或重复邮件。
 
-进程退出后 Windows 会自动释放文件锁。
+进程退出（包括崩溃）后，操作系统会自动释放文件锁，残留的锁文件不会阻塞下次启动。
 
 ---
 

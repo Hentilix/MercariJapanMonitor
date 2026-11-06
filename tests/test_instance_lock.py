@@ -1,7 +1,10 @@
 # -*- coding: utf-8 -*-
-"""Offline tests for the Phase 5.6 single-instance lock (no real processes)."""
+"""Offline tests for the single-instance lock on Windows and POSIX."""
 
 import os
+import subprocess
+import sys
+from pathlib import Path
 
 from app.single_instance import InstanceLock
 
@@ -48,3 +51,61 @@ def test_release_is_idempotent(tmp_path):
 def test_default_path_is_in_temp_dir():
     lock = InstanceLock()
     assert lock.path.name == "marketplace_monitor.lock"
+
+
+def test_lock_excludes_another_process_until_release(tmp_path):
+    lock_path = tmp_path / "instance.lock"
+    lock = InstanceLock(lock_path)
+    contender = """
+import sys
+from app.single_instance import InstanceLock
+
+lock = InstanceLock(sys.argv[1])
+acquired = lock.acquire()
+lock.release()
+sys.exit(0 if acquired else 1)
+"""
+    command = [sys.executable, "-c", contender, str(lock_path)]
+    project_root = Path(__file__).resolve().parents[1]
+
+    assert lock.acquire() is True
+    try:
+        result = subprocess.run(
+            command, cwd=project_root, capture_output=True, text=True, timeout=10
+        )
+        assert result.returncode == 1, result.stderr
+        assert result.stderr == ""
+    finally:
+        lock.release()
+
+    result = subprocess.run(
+        command, cwd=project_root, capture_output=True, text=True, timeout=10
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_abrupt_process_exit_releases_lock(tmp_path):
+    lock_path = tmp_path / "instance.lock"
+    owner = """
+import os
+import sys
+from app.single_instance import InstanceLock
+
+lock = InstanceLock(sys.argv[1])
+assert lock.acquire()
+os._exit(7)  # Skip release(), finally blocks, and interpreter cleanup.
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", owner, str(lock_path)],
+        cwd=Path(__file__).resolve().parents[1],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert result.returncode == 7, result.stderr
+
+    lock = InstanceLock(lock_path)
+    try:
+        assert lock.acquire() is True
+    finally:
+        lock.release()

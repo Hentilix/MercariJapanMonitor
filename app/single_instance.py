@@ -6,19 +6,24 @@ exits *before* creating Database / MercariClient / scheduler / HTTP server,
 so there can never be duplicate scheduler jobs, HTTP port conflicts or
 duplicate emails.
 
-Implementation: an exclusive byte-range lock on a lock file in the user's
-temp dir, using msvcrt.locking (a real OS lock, not PID-file guessing).
+Implementation: an exclusive lock on a lock file in the user's temp dir,
+using msvcrt.locking on Windows and fcntl.flock on POSIX systems such as
+Ubuntu (a real OS lock, not PID-file guessing).
 The file content (PID + start time) is informational only — the OS lock is
-the source of truth. When the owning process exits, even on a crash, Windows
+the source of truth. When the owning process exits, even on a crash, the OS
 releases the lock automatically, so a stale lock file never blocks startup.
 """
 
 import logging
-import msvcrt
 import os
 import tempfile
 from datetime import datetime
 from pathlib import Path
+
+if os.name == "nt":
+    import msvcrt
+else:
+    import fcntl
 
 log = logging.getLogger(__name__)
 
@@ -51,7 +56,10 @@ class InstanceLock:
             return False
         try:
             f.seek(0)
-            msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
+            if os.name == "nt":
+                msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError:
             # Lock held by another live process.
             f.close()
@@ -75,7 +83,10 @@ class InstanceLock:
             return
         try:
             self._file.seek(0)
-            msvcrt.locking(self._file.fileno(), msvcrt.LK_UNLCK, 1)
+            if os.name == "nt":
+                msvcrt.locking(self._file.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl.flock(self._file.fileno(), fcntl.LOCK_UN)
         except OSError:
             pass
         self._file.close()
