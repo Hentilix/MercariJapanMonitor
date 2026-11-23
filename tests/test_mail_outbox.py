@@ -40,7 +40,7 @@ async def test_rediscovered_price_reaches_history_and_mail(tmp_path, configured,
 
     async def scan():
         mail = MailOutbox(db, send=send, clock=lambda: now)
-        result = await scan_monitor(client, db, mon, outbox=mail, judge=judge, adaptive=True)
+        result = await scan_monitor(client, db, mon, outbox=mail, judge=judge)
         await mail.drain_due()
         return result
 
@@ -83,7 +83,7 @@ async def test_hidden_price_increase_blocks_match_and_mail(tmp_path, configured,
     client.search_page.return_value = SearchPage([original], None)
     client.get_item_details.return_value = detail
     judge = AsyncMock(return_value=None)
-    await scan_monitor(client, db, mon, judge=judge if cached else None, adaptive=True)
+    await scan_monitor(client, db, mon, judge=judge if cached else None)
     db.close()
 
     db = Database(path)
@@ -94,14 +94,14 @@ async def test_hidden_price_increase_blocks_match_and_mail(tmp_path, configured,
         client.search_page.return_value = SearchPage([], None)
         client.get_current_listing.return_value = (200, detail)
         mail = MailOutbox(db, clock=lambda: now)
-        await scan_monitor(client, db, mon, judge=judge, adaptive=True, outbox=mail)
+        await scan_monitor(client, db, mon, judge=judge, outbox=mail)
         judge.assert_not_awaited()
         assert db.list_monitor_products(mon.id) == []
         assert db.mail_status(mon.id).pending == 0
         assert db.pending_candidates(mon.id) == 0
 
         client.search_page.return_value = SearchPage([replace(original, price=95)], None)
-        await scan_monitor(client, db, mon, judge=judge, adaptive=True, outbox=mail)
+        await scan_monitor(client, db, mon, judge=judge, outbox=mail)
         judge.assert_awaited_once()
         client.get_current_listing.assert_awaited_once()
         assert db.list_monitor_products(mon.id)[0][2] == 95
@@ -125,7 +125,7 @@ async def test_stale_candidate_verification_controls_direct_match(configured, mo
     original = item("A")
     detail = ItemDetail(original.title, None, None, None)
     try:
-        await scan_monitor(client, db, mon, adaptive=True)
+        await scan_monitor(client, db, mon)
         generation, state, _ = db.begin_search(mon, {})
         db.save_search_page(
             mon.id, generation, state,
@@ -152,7 +152,7 @@ async def test_stale_candidate_verification_controls_direct_match(configured, mo
             return 100, detail
 
         client.get_current_listing.side_effect = inspect_listing
-        await scan_monitor(client, db, mon, outbox=mail, adaptive=True)
+        await scan_monitor(client, db, mon, outbox=mail)
         assert db.list_monitor_products(mon.id) == []
         assert db.mail_status(mon.id).pending == 0
         if first_check in ("offline", "unknown_price"):
@@ -160,10 +160,10 @@ async def test_stale_candidate_verification_controls_direct_match(configured, mo
             client.get_current_listing.side_effect = None
             client.get_current_listing.return_value = (100, detail)
             now = 1299
-            await scan_monitor(client, db, mon, outbox=mail, adaptive=True)
+            await scan_monitor(client, db, mon, outbox=mail)
             client.get_current_listing.assert_awaited_once()
             now = 1300
-            await scan_monitor(client, db, mon, outbox=mail, adaptive=True)
+            await scan_monitor(client, db, mon, outbox=mail)
             assert db.list_monitor_products(mon.id)[0][2] == 100
             assert db.next_due_mail(now)[2][0][2] == 100
         else:
@@ -178,7 +178,7 @@ async def test_failed_email_survives_restart_without_another_scan(tmp_path, conf
     db = Database(path)
     mon = db.get_monitor(db.create_monitor(name="records", keywords="CD"))
     client = AsyncMock()
-    client.search_products.return_value = [item("A"), item("B"), item("A")]
+    client.search_page.return_value = SearchPage([item("A"), item("B"), item("A")], None)
     now = 1000
     send = AsyncMock(side_effect=OSError("offline"))
     mail = MailOutbox(db, send=send, clock=lambda: now)
@@ -215,7 +215,7 @@ async def test_outbox_item_failure_rolls_back_match(tmp_path, configured):
     db = Database(tmp_path / "test.db")
     mon = db.get_monitor(db.create_monitor(name="records", keywords="CD"))
     client = AsyncMock()
-    client.search_products.return_value = [item("A")]
+    client.search_page.return_value = SearchPage([item("A")], None)
     db._conn.execute("""
         CREATE TRIGGER reject_mail_item BEFORE INSERT ON mail_items
         BEGIN SELECT RAISE(ABORT, 'injected failure'); END
@@ -278,7 +278,7 @@ async def test_unconfigured_and_old_matches_are_not_backfilled(tmp_path, configu
     outbox = MailOutbox(db, send=send)
     outbox.recover()
     client = AsyncMock()
-    client.search_products.return_value = [item("old"), item("A")]
+    client.search_page.return_value = SearchPage([item("old"), item("A")], None)
     monkeypatch.delenv("SMTP_PASSWORD")
     await scan_monitor(client, db, mon, outbox=outbox)
     monkeypatch.setenv("SMTP_PASSWORD", "restored")
@@ -296,7 +296,7 @@ async def test_worker_finishes_current_send_and_skips_deleted_batch(tmp_path, co
     first = db.get_monitor(db.create_monitor(name="first", keywords="CD"))
     second = db.get_monitor(db.create_monitor(name="second", keywords="CD"))
     client = AsyncMock()
-    client.search_products.return_value = [item("A")]
+    client.search_page.return_value = SearchPage([item("A")], None)
     entered = asyncio.Event()
     release = asyncio.Event()
 

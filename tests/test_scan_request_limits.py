@@ -49,7 +49,7 @@ async def test_shared_outage_uses_one_probe_and_keeps_details_across_restart(
     async def scan(monitor_id):
         monitor = db.get_monitor(monitor_id)
         return await scan_monitor(
-            client, db, monitor, judge=ai.make_judge(monitor.ai_requirement), adaptive=True,
+            client, db, monitor, judge=ai.make_judge(monitor.ai_requirement),
         )
 
     try:
@@ -151,7 +151,7 @@ async def test_ai_budget_rechecks_candidate_after_waiting(monkeypatch, change):
     client.get_item_details.return_value = ItemDetail("CD", "album", None, None)
     try:
         await scan_monitor(
-            client, db, monitor, judge=ai.make_judge(monitor.ai_requirement), adaptive=True,
+            client, db, monitor, judge=ai.make_judge(monitor.ai_requirement),
         )
         client.get_item_details.assert_awaited_once()
         http.post.assert_not_awaited()
@@ -187,11 +187,11 @@ async def test_rotating_key_reuses_details_and_keeps_shared_ai_budget(tmp_path, 
     ai = DeepSeekClient(SimpleNamespace(post=post), budget, clock=lambda: now)
     try:
         await scan_monitor(
-            client, db, monitor, judge=ai.make_judge(monitor.ai_requirement), adaptive=True,
+            client, db, monitor, judge=ai.make_judge(monitor.ai_requirement),
         )
         monkeypatch.setenv("DEEPSEEK_API_KEY_FOR_MJM", "replacement")
         await scan_monitor(
-            client, db, monitor, judge=ai.make_judge(monitor.ai_requirement), adaptive=True,
+            client, db, monitor, judge=ai.make_judge(monitor.ai_requirement),
         )
         assert requests == [("Bearer expired-key", 0), ("Bearer replacement", 60)]
         client.get_item_details.assert_awaited_once()

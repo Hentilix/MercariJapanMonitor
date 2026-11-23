@@ -18,9 +18,6 @@ class Listings:
     async def search_page(self, *args, **kwargs):
         return SearchPage(self.items, None)
 
-    async def search_products(self, *args, **kwargs):
-        return self.items
-
     async def get_item_details(self, *args):
         return ItemDetail("CD", "album", None, None)
 
@@ -32,8 +29,7 @@ def edit(db, mid, **changes):
     db.update_monitor(mid, **(fields | changes))
 
 
-@pytest.mark.parametrize("adaptive", [True, False])
-def test_old_rejection_can_become_first_match(tmp_path, adaptive):
+def test_old_rejection_can_become_first_match(tmp_path):
     db = Database(tmp_path / "scan.db")
     mid = db.create_monitor(name="CD", keywords="CD", ai_requirement="old")
     listings = Listings()
@@ -46,7 +42,7 @@ def test_old_rejection_can_become_first_match(tmp_path, adaptive):
 
     def scan():
         return asyncio.run(scan_monitor(
-            listings, db, db.get_monitor(mid), adaptive=adaptive, judge=judge,
+            listings, db, db.get_monitor(mid), judge=judge,
         ))
 
     assert scan().ai_rejected == 1
@@ -65,8 +61,7 @@ def test_old_rejection_can_become_first_match(tmp_path, adaptive):
     db.close()
 
 
-@pytest.mark.parametrize("adaptive", [True, False])
-def test_edit_then_revert_during_judgment_discards_old_result(tmp_path, adaptive):
+def test_edit_then_revert_during_judgment_discards_old_result(tmp_path):
     db = Database(tmp_path / "scan.db")
     mid = db.create_monitor(name="CD", keywords="CD", ai_requirement="old")
 
@@ -76,12 +71,12 @@ def test_edit_then_revert_during_judgment_discards_old_result(tmp_path, adaptive
         return True
 
     result = asyncio.run(scan_monitor(
-        Listings(), db, db.get_monitor(mid), adaptive=adaptive, judge=judge,
+        Listings(), db, db.get_monitor(mid), judge=judge,
     ))
     assert result.ai_matched == 0
     assert db.count_monitor_products(mid, matched=None) == 0
     assert db.get_monitor(mid).last_scan_at is None
-    assert db.pending_candidates(mid) == int(adaptive)
+    assert db.pending_candidates(mid) == 1
     db.close()
 
 
@@ -100,7 +95,7 @@ async def test_promotion_and_mail_commit_together(tmp_path, monkeypatch):
 
     async def scan():
         return await scan_monitor(
-            listings, db, db.get_monitor(mid), adaptive=True, judge=judge, outbox=outbox,
+            listings, db, db.get_monitor(mid), judge=judge, outbox=outbox,
         )
 
     assert (await scan()).ai_rejected == 1
@@ -157,14 +152,14 @@ async def test_legacy_rejections_retry_after_migration_and_restart(tmp_path):
         return False
 
     monitor = db.get_monitor(mid)
-    result = await scan_monitor(listings, db, monitor, adaptive=True, judge=reject)
+    result = await scan_monitor(listings, db, monitor, judge=reject)
     assert (result.ai_rejected, result.ignored) == (1, 1)
     assert db.product_decision(mid, "m1") == (0, 1)
     assert db.list_monitor_products(mid, include_decision=True)[0][-2:] == (1, None)
     db.close()
 
     db = Database(path)
-    await scan_monitor(listings, db, db.get_monitor(mid), adaptive=True, judge=reject)
+    await scan_monitor(listings, db, db.get_monitor(mid), judge=reject)
     assert len(calls) == 1
     db.close()
 
@@ -188,18 +183,18 @@ async def test_deep_recheck_with_unknown_date_keeps_rejection_until_retry(tmp_pa
     async def judge(detail):
         return verdict
 
-    await scan_monitor(Listings(), db, db.get_monitor(mid), adaptive=True, judge=judge)
+    await scan_monitor(Listings(), db, db.get_monitor(mid), judge=judge)
     edit(db, mid, ai_requirement="new")
     monitor = db.get_monitor(mid)
     verdict = None
-    result = await scan_monitor(DeepListings(), db, monitor, adaptive=True, judge=judge)
+    result = await scan_monitor(DeepListings(), db, monitor, judge=judge)
     assert result.ai_errors == 1
     assert db.product_decision(mid, "m1") == (0, 1)
     assert db.pending_candidates(mid) == 1
 
     verdict = False
     now += 300
-    result = await scan_monitor(DeepListings(), db, monitor, adaptive=True, judge=judge)
+    result = await scan_monitor(DeepListings(), db, monitor, judge=judge)
     assert result.ai_rejected == 1
     assert db.product_decision(mid, "m1") == (0, 2)
     assert db.pending_candidates(mid) == 0

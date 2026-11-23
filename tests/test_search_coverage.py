@@ -47,16 +47,16 @@ async def test_rediscovered_candidate_is_filtered_again(changes, max_price, disc
     judge = AsyncMock(return_value=True)
     try:
         client.search_page.return_value = SearchPage([original], None)
-        await scan_monitor(client, db, monitor, adaptive=True)
+        await scan_monitor(client, db, monitor)
         client.search_page.return_value = SearchPage([replace(original, **changes)], None)
-        result = await scan_monitor(client, db, monitor, adaptive=True, judge=judge)
+        result = await scan_monitor(client, db, monitor, judge=judge)
         assert result.new == 0
         if discarded:
             judge.assert_not_awaited()
             assert db.pending_candidates(monitor.id) == 0
             assert db.wants_recheck(monitor.id, "A")
             client.search_page.return_value = SearchPage([original], None)
-            result = await scan_monitor(client, db, monitor, adaptive=True, judge=judge)
+            result = await scan_monitor(client, db, monitor, judge=judge)
             assert result.new == result.ai_matched == 1
             assert not db.wants_recheck(monitor.id, "A")
         else:
@@ -88,10 +88,10 @@ async def test_later_or_page_refreshes_title_and_invalidates_cached_detail(monke
     ]
     judge = AsyncMock(return_value=None)
     try:
-        await scan_monitor(client, db, monitor, adaptive=True, judge=judge)
+        await scan_monitor(client, db, monitor, judge=judge)
         now = 1300
         judge.return_value = True
-        result = await scan_monitor(client, db, monitor, adaptive=True, judge=judge)
+        result = await scan_monitor(client, db, monitor, judge=judge)
         assert result.new == 0
         assert result.ai_matched == 1
         assert judge.await_args.args[0].title == edited.title
@@ -140,7 +140,7 @@ def test_first_scan_budget(tmp_path, total, expected):
     db = Database(tmp_path / "scan.db")
     monitor = db.get_monitor(db.create_monitor(name="CD", keywords="CD"))
     pages = Pages(total)
-    result = asyncio.run(scan_monitor(pages, db, monitor, adaptive=True))
+    result = asyncio.run(scan_monitor(pages, db, monitor))
     assert len(pages.calls) == result.ai_matched == expected
     db.close()
 
@@ -150,13 +150,13 @@ def test_restart_resumes_first_scan(tmp_path):
     db = Database(path)
     monitor = db.get_monitor(db.create_monitor(name="CD", keywords="CD"))
     first = Pages(4, fail_at=3)
-    result = asyncio.run(scan_monitor(first, db, monitor, adaptive=True))
+    result = asyncio.run(scan_monitor(first, db, monitor))
     assert result.ai_matched == 2
     db.close()
 
     db = Database(path)
     second = Pages(4)
-    result = asyncio.run(scan_monitor(second, db, monitor, adaptive=True))
+    result = asyncio.run(scan_monitor(second, db, monitor))
     assert second.calls == [("CD", 1), ("CD", 3), ("CD", 4)]
     assert result.ai_matched == 2
     assert db.count_monitor_products(monitor.id) == 4
@@ -181,7 +181,7 @@ def test_single_query_checks_homepage_while_first_scan_page_keeps_failing(keywor
     try:
         for now in (1000, 2000, 3000):
             pages = Listings(3, fail_at=2)
-            result = asyncio.run(scan_monitor(pages, db, monitor, adaptive=True))
+            result = asyncio.run(scan_monitor(pages, db, monitor))
             assert pages.calls == [(query, 1), (query, 2)]
             assert result.ai_matched == 1
             assert db.has_monitor_product(monitor.id, f"item-{now}")
@@ -191,7 +191,7 @@ def test_single_query_checks_homepage_while_first_scan_page_keeps_failing(keywor
             assert state["initial_cursor"][query][0] == "2"
 
         pages = Pages(3, fail_at=1)
-        asyncio.run(scan_monitor(pages, db, monitor, adaptive=True))
+        asyncio.run(scan_monitor(pages, db, monitor))
         assert pages.calls == [(query, 1), (query, 2), (query, 3)]
         assert db.begin_search(monitor, {})[1]["initial_done"]
         assert db.count_monitor_products(monitor.id) == 5
@@ -203,10 +203,10 @@ def test_single_query_first_scan_resume_respects_both_page_budgets():
     db = Database(":memory:")
     monitor = db.get_monitor(db.create_monitor(name="CD", keywords="CD"))
     try:
-        asyncio.run(scan_monitor(Pages(30, fail_at=13), db, monitor, adaptive=True))
+        asyncio.run(scan_monitor(Pages(30, fail_at=13), db, monitor))
         for expected_pages, total in (([1, 13, 14, 15, 16, 17], 17), ([1, 18, 19, 20], 20)):
             pages = Pages(30)
-            asyncio.run(scan_monitor(pages, db, monitor, adaptive=True))
+            asyncio.run(scan_monitor(pages, db, monitor))
             assert [page for _, page in pages.calls] == expected_pages
             state = db.begin_search(monitor, {})[1]
             assert state["first_pages"] == total
@@ -237,7 +237,7 @@ def test_or_keeps_checking_both_homepages_during_a_persistent_page_failure(tmp_p
 
     def scan():
         listings = Listings(1)
-        asyncio.run(scan_monitor(listings, db, monitor, adaptive=True))
+        asyncio.run(scan_monitor(listings, db, monitor))
         return listings.calls
 
     try:
@@ -279,13 +279,13 @@ def test_or_incomplete_first_scan_rotates_within_six_page_budget(tmp_path, saved
                 "front_order": words, "deep_order": words, "deep_cursor": {},
             })
         first = Listings(1)
-        asyncio.run(scan_monitor(first, db, monitor, adaptive=True))
+        asyncio.run(scan_monitor(first, db, monitor))
         assert len(first.calls) == len(set(first.calls)) == (6 if saved_progress else 15)
         homes = set()
         retries = set()
         for _ in range(6):
             pages = Listings(1)
-            asyncio.run(scan_monitor(pages, db, monitor, adaptive=True))
+            asyncio.run(scan_monitor(pages, db, monitor))
             assert len(pages.calls) == len(set(pages.calls)) == 6
             homes.update(query for query, token in pages.calls if token is None)
             retries.update(query for query, token in pages.calls if token == "2")
@@ -302,12 +302,12 @@ def test_or_rotates_beyond_first_twenty_queries(tmp_path):
         name="OR", keywords=",".join(words), keyword_mode="OR",
     ))
     first = Pages(4)
-    asyncio.run(scan_monitor(first, db, monitor, adaptive=True))
+    asyncio.run(scan_monitor(first, db, monitor))
     assert first.calls == [(word, 1) for word in words[:20]]
     searched = set(first.calls)
     for _ in range(10):
         pages = Pages(4)
-        asyncio.run(scan_monitor(pages, db, monitor, adaptive=True))
+        asyncio.run(scan_monitor(pages, db, monitor))
         assert len(set(pages.calls)) == len(pages.calls) <= 6
         searched.update(pages.calls)
     assert {(word, 1) for word in words} <= searched
@@ -317,7 +317,7 @@ def test_or_rotates_beyond_first_twenty_queries(tmp_path):
 def test_depth_keeps_advancing_past_old_pages_and_resets_invalid_token(tmp_path):
     db = Database(tmp_path / "scan.db")
     monitor = db.get_monitor(db.create_monitor(name="CD", keywords="CD"))
-    asyncio.run(scan_monitor(Pages(1), db, monitor, adaptive=True))
+    asyncio.run(scan_monitor(Pages(1), db, monitor))
 
     class MixedPages(Pages):
         async def search_page(self, query, *, page_token, **kwargs):
@@ -328,18 +328,18 @@ def test_depth_keeps_advancing_past_old_pages_and_resets_invalid_token(tmp_path)
             return page
 
     first = MixedPages(12)
-    asyncio.run(scan_monitor(first, db, monitor, adaptive=True))
+    asyncio.run(scan_monitor(first, db, monitor))
     assert [page for _, page in first.calls] == list(range(1, 7))
     second = MixedPages(12)
-    asyncio.run(scan_monitor(second, db, monitor, adaptive=True))
+    asyncio.run(scan_monitor(second, db, monitor))
     assert [page for _, page in second.calls] == [1, 2, 3, 7, 8, 9]
     third = MixedPages(12)
-    asyncio.run(scan_monitor(third, db, monitor, adaptive=True))
+    asyncio.run(scan_monitor(third, db, monitor))
     assert [page for _, page in third.calls] == [1, 2, 3, 10, 11, 12]
     assert db.has_monitor_product(monitor.id, "CD-10")
     assert not db.has_monitor_product(monitor.id, "CD-9")
 
-    asyncio.run(scan_monitor(MixedPages(12), db, monitor, adaptive=True))
+    asyncio.run(scan_monitor(MixedPages(12), db, monitor))
 
     class Expired(MixedPages):
         async def search_page(self, query, *, page_token, **kwargs):
@@ -347,10 +347,10 @@ def test_depth_keeps_advancing_past_old_pages_and_resets_invalid_token(tmp_path)
                 raise InvalidPageToken("expired")
             return await super().search_page(query, page_token=page_token, **kwargs)
 
-    asyncio.run(scan_monitor(Expired(12), db, monitor, adaptive=True))
+    asyncio.run(scan_monitor(Expired(12), db, monitor))
     assert "重置 1 次" in db.get_monitor(monitor.id).last_result
     restarted = MixedPages(12)
-    asyncio.run(scan_monitor(restarted, db, monitor, adaptive=True))
+    asyncio.run(scan_monitor(restarted, db, monitor))
     assert [page for _, page in restarted.calls] == list(range(1, 7))
     db.close()
 
@@ -376,7 +376,7 @@ def test_ai_backlog_survives_restart_and_search_failure(tmp_path):
         checked.append(int(detail.description))
         return True
 
-    asyncio.run(scan_monitor(Batch(1), db, monitor, adaptive=True, judge=judge))
+    asyncio.run(scan_monitor(Batch(1), db, monitor, judge=judge))
     assert checked == [*range(119, 94, -1), *range(25)]
     assert db.pending_candidates(monitor.id) == 70
     db.close()
@@ -389,7 +389,7 @@ def test_ai_backlog_survives_restart_and_search_failure(tmp_path):
             return 100, await self.get_item_details(item_id, item_type)
 
     db = Database(path)
-    asyncio.run(scan_monitor(Offline(1), db, monitor, adaptive=True, judge=judge))
+    asyncio.run(scan_monitor(Offline(1), db, monitor, judge=judge))
     assert len(set(checked)) == 100
     assert db.pending_candidates(monitor.id) == 20
     db.close()
@@ -419,12 +419,12 @@ def test_failing_candidates_do_not_starve_middle_item(tmp_path, monkeypatch):
         return True
 
     try:
-        asyncio.run(scan_monitor(Listings(1), db, monitor, adaptive=True, judge=judge))
+        asyncio.run(scan_monitor(Listings(1), db, monitor, judge=judge))
         assert len(attempted) == 50
         assert "25" not in attempted
         attempted.clear()
         now += 1800
-        asyncio.run(scan_monitor(Listings(1), db, monitor, adaptive=True, judge=judge))
+        asyncio.run(scan_monitor(Listings(1), db, monitor, judge=judge))
         assert db.product_decision(monitor.id, "25") == (1, 1)
         assert len(attempted) == len(set(attempted)) == 50
     finally:
@@ -481,7 +481,7 @@ def test_candidate_retry_backoff_and_detail_survive_restart(tmp_path, monkeypatc
             return ItemDetail("CD", "original", None, None)
 
     def scan():
-        return asyncio.run(scan_monitor(Listing(1), db, monitor, adaptive=True, judge=judge))
+        return asyncio.run(scan_monitor(Listing(1), db, monitor, judge=judge))
 
     verdict = None
 
@@ -516,13 +516,13 @@ def test_failed_candidate_insert_rolls_back_page_progress(tmp_path):
         BEGIN SELECT RAISE(ABORT, 'insert failed'); END
     """)
     with pytest.raises(sqlite3.IntegrityError, match="insert failed"):
-        asyncio.run(scan_monitor(Pages(3), db, monitor, adaptive=True))
+        asyncio.run(scan_monitor(Pages(3), db, monitor))
     assert db.pending_candidates(monitor.id) == 1
     db._conn.execute("DROP TRIGGER fail_page")
     db.close()
     db = Database(path)
     pages = Pages(3)
-    result = asyncio.run(scan_monitor(pages, db, monitor, adaptive=True))
+    result = asyncio.run(scan_monitor(pages, db, monitor))
     assert pages.calls == [("CD", 1), ("CD", 2), ("CD", 3)]
     assert result.ai_matched == 3
     db.close()
@@ -541,11 +541,11 @@ def test_old_page_cannot_write_into_edited_search(tmp_path):
             )
             return await super().search_page(query, **kwargs)
 
-    asyncio.run(scan_monitor(EditDuringRequest(4), db, monitor, adaptive=True))
+    asyncio.run(scan_monitor(EditDuringRequest(4), db, monitor))
     assert db.pending_candidates(monitor.id) == 0
     assert not db.has_monitor_product(monitor.id, "CD-1")
     pages = Pages(1)
-    asyncio.run(scan_monitor(pages, db, db.get_monitor(monitor.id), adaptive=True))
+    asyncio.run(scan_monitor(pages, db, db.get_monitor(monitor.id)))
     assert pages.calls == [("LP", 1)]
     db.close()
 
@@ -553,7 +553,7 @@ def test_old_page_cannot_write_into_edited_search(tmp_path):
 def test_deep_token_cycle_and_missing_dates_are_reported(tmp_path):
     db = Database(tmp_path / "scan.db")
     monitor = db.get_monitor(db.create_monitor(name="CD", keywords="CD"))
-    asyncio.run(scan_monitor(Pages(1), db, monitor, adaptive=True))
+    asyncio.run(scan_monitor(Pages(1), db, monitor))
 
     class Loop(Pages):
         async def search_page(self, query, *, page_token, **kwargs):
@@ -563,7 +563,7 @@ def test_deep_token_cycle_and_missing_dates_are_reported(tmp_path):
             return page
 
     pages = Loop(10)
-    asyncio.run(scan_monitor(pages, db, monitor, adaptive=True))
+    asyncio.run(scan_monitor(pages, db, monitor))
     assert pages.calls == [("CD", n) for n in range(1, 5)]
     assert not db.has_monitor_product(monitor.id, "CD-4")
     summary = db.get_monitor(monitor.id).last_result

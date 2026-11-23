@@ -8,7 +8,7 @@ import asyncio
 import pytest
 
 from app.database import Database
-from app.mercari import ItemDetail, MercariError, SearchItem
+from app.mercari import ItemDetail, MercariError, SearchItem, SearchPage
 from app.scanner import scan_monitor
 
 
@@ -19,15 +19,15 @@ class FakeClient:
         self._details = details or {}
         self._detail_errors = detail_errors or {}
         self.detail_calls = []  # (item_id, item_type)
-        self.queries = []  # every query string passed to search_products
-        self.searches = []  # every (query, kwargs) passed to search_products
+        self.queries = []  # every query string passed to search_page
+        self.searches = []  # every (query, kwargs) passed to search_page
 
-    async def search_products(self, query, **kwargs):
+    async def search_page(self, query, **kwargs):
         self.queries.append(query)
         self.searches.append((query, kwargs))
         if self._error is not None:
             raise self._error
-        return list(self._items)
+        return SearchPage(list(self._items), None)
 
     async def get_item_details(self, item_id, item_type=None):
         self.detail_calls.append((item_id, item_type))
@@ -194,7 +194,9 @@ def test_deepseek_false_is_processed_without_history(tmp_path):
     db.close()
 
 
-def test_deepseek_error_is_retried_next_scan(tmp_path):
+def test_deepseek_error_is_retried_next_scan(tmp_path, monkeypatch):
+    now = 1000
+    monkeypatch.setattr("app.scanner.time", lambda: now)
     db, mon = make_db(tmp_path)
     client = FakeClient(
         [make_item("X", "Built to Spill X CD", 1200)],
@@ -208,16 +210,19 @@ def test_deepseek_error_is_retried_next_scan(tmp_path):
     assert not db.has_monitor_product(mon.id, "X")  # NOT processed
 
     calls2 = []
+    now += 3600
     second = run(
         scan_monitor(client, db, mon, judge=fake_judge([True], calls2))
     )
-    assert second.new == 1               # new again
+    assert second.new == 0  # the existing candidate was retried
     assert second.ai_matched == 1        # and it succeeded this time
     assert db.has_monitor_product(mon.id, "X")
     db.close()
 
 
-def test_full_item_error_is_retried_next_scan(tmp_path):
+def test_full_item_error_is_retried_next_scan(tmp_path, monkeypatch):
+    now = 1000
+    monkeypatch.setattr("app.scanner.time", lambda: now)
     db, mon = make_db(tmp_path)
     client = FakeClient(
         [make_item("X", "Built to Spill X CD", 1200)],
@@ -236,6 +241,7 @@ def test_full_item_error_is_retried_next_scan(tmp_path):
         details={"X": make_detail()},
     )
     calls2 = []
+    now += 3600
     second = run(
         scan_monitor(client2, db, mon, judge=fake_judge([True], calls2))
     )
@@ -453,13 +459,12 @@ def test_last_scan_result_is_updated(tmp_path):
     db.close()
 
 
-def test_search_failure_records_status_and_raises(tmp_path):
+def test_search_failure_records_status(tmp_path):
     db, mon = make_db(tmp_path)
     client = FakeClient(error=MercariError("Mercari search failed: boom"))
-    with pytest.raises(MercariError):
-        run(scan_monitor(client, db, mon, judge=None))
+    run(scan_monitor(client, db, mon, judge=None))
     mon = db.get_monitor(mon.id)
-    assert mon.last_result.startswith("搜索失败")
+    assert "搜索失败 1 次，下轮继续" in mon.last_result
     db.close()
 
 
@@ -478,8 +483,10 @@ def test_no_ai_gate_records_all_candidates(tmp_path):
     db.close()
 
 
-def test_judge_crash_is_not_processed(tmp_path):
+def test_judge_crash_is_not_processed(tmp_path, monkeypatch):
     """A crashing judge counts as an AI error; the item is retried next scan."""
+    now = 1000
+    monkeypatch.setattr("app.scanner.time", lambda: now)
     db, mon = make_db(tmp_path)
     client = FakeClient(
         [make_item("X", "Built to Spill X CD", 1200)],
@@ -494,10 +501,11 @@ def test_judge_crash_is_not_processed(tmp_path):
     assert not db.has_monitor_product(mon.id, "X")  # NOT processed
 
     calls = []
+    now += 3600
     second = run(
         scan_monitor(client, db, mon, judge=fake_judge([True], calls))
     )
-    assert second.new == 1
+    assert second.new == 0  # the existing candidate was retried
     assert second.ai_matched == 1
     assert db.has_monitor_product(mon.id, "X")
     db.close()
@@ -590,9 +598,6 @@ def test_or_mode_split_keywords_pass_independently(tmp_path):
 
 # ------------------------------------- P0-2: AI required + judge unavailable
 def test_judge_none_with_ai_requirement_matches_nothing(tmp_path):
-    """P0-2: when a monitor requires AI but no judge is available, nothing
-    is matched, nothing is recorded, nothing is emailed — and the items are
-    still new on the next scan (retried)."""
     db, mon = make_db(tmp_path, ai_requirement="必须是全新正版日版 CD，带 OBI")
     client = FakeClient(
         [
@@ -606,20 +611,24 @@ def test_judge_none_with_ai_requirement_matches_nothing(tmp_path):
     )
     assert result.ai_matched == 0
     assert result.ai_rejected == 0
-    assert result.ai_errors == 2
+    assert result.ai_errors == 0
+    assert "缺少 DeepSeek API Key" in result.summary
+    assert client.detail_calls == []
+    assert db.pending_candidates(mon.id) == 2
     assert batches == []  # no email without a verdict
     assert not db.has_monitor_product(mon.id, "1")
     assert not db.has_monitor_product(mon.id, "2")
 
     # A later scan with a working judge processes them normally.
     client2 = FakeClient(
-        [make_item("1", "Built to Spill 1 CD", 1200)],
-        details={"1": make_detail()},
+        client._items,
+        details={"1": make_detail(), "2": make_detail()},
     )
     calls = []
-    second = run(scan_monitor(client2, db, mon, judge=fake_judge([True], calls)))
-    assert second.new == 1
-    assert second.ai_matched == 1
+    second = run(scan_monitor(client2, db, mon, judge=fake_judge([True, True], calls)))
+    assert second.new == 0
+    assert second.ai_matched == 2
+    assert db.pending_candidates(mon.id) == 0
     assert db.has_monitor_product(mon.id, "1")
     db.close()
 

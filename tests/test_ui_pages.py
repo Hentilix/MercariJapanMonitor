@@ -300,7 +300,7 @@ async def test_manual_scan_displays_warning_for_invalidated_result(page_session,
         assert target == monitor_id
         client = AsyncMock()
         client.search_page.side_effect = search_page
-        return (await scan_monitor(client, db, monitor, adaptive=True)).summary
+        return (await scan_monitor(client, db, monitor)).summary
 
     real_scheduler = MonitorScheduler(scan)
     scheduler.run_monitor_now = real_scheduler.run_monitor_now

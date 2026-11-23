@@ -89,7 +89,6 @@ def make_scan_handler(
             mon,
             judge=deepseek.make_judge(mon.ai_requirement),
             outbox=mail_outbox,
-            adaptive=True,
         )
         return result.summary
     return scan_monitor

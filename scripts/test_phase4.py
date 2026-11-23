@@ -108,7 +108,6 @@ async def run_scan(limit: int) -> int:
                 mon,
                 judge=judge,
                 outbox=outbox,
-                adaptive=True,
                 ai_limit=limit,
             )
     finally:

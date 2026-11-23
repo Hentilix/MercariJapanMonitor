@@ -89,7 +89,7 @@ async def scan_by_id(
         return
     judge = make_judge(ai_client, mon.ai_requirement)
     try:
-        await scan_monitor(client, db, mon, judge=judge, outbox=outbox, adaptive=True)
+        await scan_monitor(client, db, mon, judge=judge, outbox=outbox)
     except Exception:
         log.exception("Monitor %s (%s) 扫描失败", mon.id, mon.name)
 
