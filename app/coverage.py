@@ -2,12 +2,13 @@
 
 import logging
 from collections import deque
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from time import time
 
 from app.database import Database, Monitor
 from app.filter import FilterRule, passes
-from app.mercari import InvalidPageToken, MercariClient, MercariError
+from app.mercari import InvalidPageToken, MercariClient, MercariError, SearchItem
 from app.request_budget import RequestDeferred, guard_requests
 
 log = logging.getLogger(__name__)
@@ -87,46 +88,11 @@ async def discover(client: MercariClient, db: Database, monitor: Monitor,
     def search_is_current() -> bool:
         return db.rule_is_current(monitor) and db.search_is_current(monitor.id, generation)
 
-    async def fetch(query, token, trail, phase, update):
-        nonlocal budget
-        budget -= 1
-        requested.add((query, token))
-        try:
-            with guard_requests(search_is_current):
-                page = await client.search_page(
-                    query, page_token=token, min_price=monitor.min_price,
-                    max_price=monitor.max_price, exclude=" ".join(rule.exclude_keywords) or None,
-                )
-        except RequestDeferred:
-            return False
-        except InvalidPageToken:
-            result.resets += 1
-            if not resume_with_front or phase == "first":
-                blocked.add(query)
-            update(None, [], False)
-            return save_page([]) is not None
-        except MercariError as exc:
-            result.failures += 1
-            if not resume_with_front:
-                blocked.add(query)
-            log.warning("Monitor %s query %r page failed: %s", monitor.id, query, exc)
-            return save_page([]) is not None
-
-        setattr(result, phase, getattr(result, phase) + 1)
-        trail = [*trail, token]
-        following = page.next_page_token or None
-        cycle = following is not None and following in trail
-        if cycle:
-            result.resets += 1
-            blocked.add(query)
-        elif following is None:
-            result.ends += 1
-        update(None if cycle else following, [] if cycle else trail, following is None)
-
+    def process_page(items: list[SearchItem], phase: str) -> bool:
         candidates = []
         refresh = []
         discard = []
-        for item in {item.id: item for item in page.items}.values():
+        for item in {item.id: item for item in items}.values():
             pending = db.has_candidate(monitor.id, item.id)
             if (item.id in found_ids and not pending and item.id not in discarded_ids
                     and not (phase == "first" and item.id in skipped_front_ids)):
@@ -173,6 +139,59 @@ async def discover(client: MercariClient, db: Database, monitor: Monitor,
         result.queued += inserted
         result.candidates = len(candidate_ids)
         result.found = len(found_ids)
+        return True
+
+    async def fetch(query, token, trail, phase, update):
+        nonlocal budget
+        budget -= 1
+        requested.add((query, token))
+        try:
+            with guard_requests(search_is_current):
+                page = await client.search_page(
+                    query, page_token=token, min_price=monitor.min_price,
+                    max_price=monitor.max_price, exclude=" ".join(rule.exclude_keywords) or None,
+                )
+        except RequestDeferred:
+            return False
+        except InvalidPageToken:
+            result.resets += 1
+            if not resume_with_front or phase == "first":
+                blocked.add(query)
+            update(None, [], False)
+            return save_page([]) is not None
+        except MercariError as exc:
+            result.failures += 1
+            if not resume_with_front:
+                blocked.add(query)
+            log.warning("Monitor %s query %r page failed: %s", monitor.id, query, exc)
+            return save_page([]) is not None
+
+        setattr(result, phase, getattr(result, phase) + 1)
+        trail = [*trail, token]
+        following = page.next_page_token or None
+        cycle = following is not None and following in trail
+        if cycle:
+            result.resets += 1
+            blocked.add(query)
+        elif following is None:
+            result.ends += 1
+        update(None if cycle else following, [] if cycle else trail, following is None)
+
+        return process_page(page.items, phase)
+
+    async def run_actions(
+        actions: tuple[tuple[Callable[[], Awaitable[bool | None]], int], ...],
+    ) -> bool:
+        """Spend the shared page budget in priority order."""
+        for action, count in actions:
+            for _ in range(count):
+                if not budget:
+                    return True
+                advanced = await action()
+                if advanced is False:
+                    return False
+                if advanced is None:
+                    break
         return True
 
     if initial_pending:
@@ -225,15 +244,8 @@ async def discover(client: MercariClient, db: Database, monitor: Monitor,
              (check_homepage, ROUND_PAGES), (continue_first, ROUND_PAGES))
             if resume_with_front else ((continue_first, budget),)
         )
-        for action, count in actions:
-            for _ in range(count):
-                if not budget:
-                    break
-                advanced = await action()
-                if advanced is False:
-                    return None
-                if advanced is None:
-                    break
+        if not await run_actions(actions):
+            return None
         result.limited = budget == 0 and bool(order)
         return result
 
@@ -294,16 +306,11 @@ async def discover(client: MercariClient, db: Database, monitor: Monitor,
             return await fetch(query, token, trail, "deep", update)
         return None
 
-    for action, count in ((front, FRONT_PAGES), (deep, ROUND_PAGES - FRONT_PAGES),
-                          (front, ROUND_PAGES), (deep, ROUND_PAGES)):
-        for _ in range(count):
-            if not budget:
-                break
-            advanced = await action()
-            if advanced is False:
-                return None
-            if advanced is None:
-                break
+    if not await run_actions((
+        (front, FRONT_PAGES), (deep, ROUND_PAGES - FRONT_PAGES),
+        (front, ROUND_PAGES), (deep, ROUND_PAGES),
+    )):
+        return None
     if save_page([]) is None:
         return None
     result.limited = budget == 0 and any(
