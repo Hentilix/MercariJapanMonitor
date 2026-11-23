@@ -24,10 +24,11 @@ import httpx  # noqa: E402
 
 from app.database import Database, Monitor  # noqa: E402
 from app.deepseek import judge_item  # noqa: E402
-from app.email import make_match_notifier  # noqa: E402
+from app.outbox import MailOutbox  # noqa: E402
 from app.mercari import MercariClient  # noqa: E402
 from app.scanner import scan_monitor  # noqa: E402
 from app.scheduler import MonitorScheduler  # noqa: E402
+from app.single_instance import InstanceLock  # noqa: E402
 
 TEST_DB = Path(__file__).resolve().parents[1] / "data" / "phase3_test.db"
 MONITOR_NAME = "Phase3 Test Monitor"
@@ -80,15 +81,15 @@ def make_judge(ai_client: httpx.AsyncClient, requirement: str):
 
 
 async def scan_by_id(
-    monitor_id: int, db: Database, client: MercariClient, ai_client: httpx.AsyncClient
+    monitor_id: int, db: Database, client: MercariClient, ai_client: httpx.AsyncClient,
+    outbox: MailOutbox,
 ) -> None:
     mon = db.get_monitor(monitor_id)
     if mon is None:
         return
     judge = make_judge(ai_client, mon.ai_requirement)
-    notifier = make_match_notifier(label=mon.name, recipient=mon.notification_email)
     try:
-        await scan_monitor(client, db, mon, judge=judge, notifier=notifier)
+        await scan_monitor(client, db, mon, judge=judge, outbox=outbox, adaptive=True)
     except Exception:
         log.exception("Monitor %s (%s) 扫描失败", mon.id, mon.name)
 
@@ -97,10 +98,13 @@ async def run_single() -> int:
     """--once mode: one scan, then exit."""
     db = Database(TEST_DB)
     client = MercariClient()
+    outbox = MailOutbox(db)
+    outbox.recover()
     try:
         async with httpx.AsyncClient(timeout=30.0) as ai_client:
             mon = ensure_monitor(db)
-            await scan_by_id(mon.id, db, client, ai_client)
+            await scan_by_id(mon.id, db, client, ai_client, outbox)
+            await outbox.drain_due()
             return 0
     finally:
         db.close()
@@ -112,10 +116,12 @@ async def run_monitor() -> int:
     db = Database(TEST_DB)
     client = MercariClient()
     ai_client = httpx.AsyncClient(timeout=30.0)
+    outbox = MailOutbox(db)
     ensure_monitor(db)
     scheduler = MonitorScheduler(
-        lambda monitor_id: scan_by_id(monitor_id, db, client, ai_client)
+        lambda monitor_id: scan_by_id(monitor_id, db, client, ai_client, outbox)
     )
+    outbox.start()
     scheduler.start(db.list_monitors())
     log.info(
         "Scheduler started (monitor %r, every %d minutes)",
@@ -128,6 +134,7 @@ async def run_monitor() -> int:
     finally:
         log.info("Stopping...")
         await scheduler.stop()
+        await outbox.stop()
         db.close()
         await client.close()
         await ai_client.aclose()
@@ -137,11 +144,19 @@ async def run_monitor() -> int:
 
 def main() -> int:
     setup_logging()
-    if "--once" in sys.argv:
-        log.info("Single-scan mode (--once)")
-        return asyncio.run(run_single())
-    log.info("Starting MercariJapanMonitor phase3 test (Ctrl+C to stop)")
-    return asyncio.run(run_monitor())
+    TEST_DB.parent.mkdir(parents=True, exist_ok=True)
+    lock = InstanceLock(TEST_DB.with_suffix(".db.lock"))
+    if not lock.acquire():
+        log.error("The Phase 3 test database is already in use")
+        return 1
+    try:
+        if "--once" in sys.argv:
+            log.info("Single-scan mode (--once)")
+            return asyncio.run(run_single())
+        log.info("Starting MercariJapanMonitor phase3 test (Ctrl+C to stop)")
+        return asyncio.run(run_monitor())
+    finally:
+        lock.release()
 
 
 if __name__ == "__main__":

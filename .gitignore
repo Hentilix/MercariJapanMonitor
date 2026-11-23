@@ -7,6 +7,7 @@ __pycache__/
 
 # Runtime data — SQLite database files only (keep data/ directory itself)
 data/*.db
+data/*.db.lock
 
 # Runtime logs (Phase 5.6 file logging)
 data/logs/

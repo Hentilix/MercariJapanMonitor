@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 <#
   Phase 5.6 — 安装/卸载 Windows 计划任务 "MarketplaceMonitor"。
 

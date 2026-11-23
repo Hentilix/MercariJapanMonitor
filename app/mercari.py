@@ -14,6 +14,8 @@ from mercapi.models import Item
 from mercapi.models.product import Product
 from mercapi.requests import SearchRequestData
 
+from app.request_budget import RequestBudget, RequestDeferred, check_request
+
 log = logging.getLogger(__name__)
 
 ITEM_URL_BASE = "https://jp.mercari.com/item/"
@@ -49,6 +51,25 @@ class MercariError(Exception):
     """Raised when talking to Mercari fails."""
 
 
+class InvalidPageToken(MercariError):
+    """Mercari rejected a pagination token."""
+
+
+def _rejects_page_token(message: str) -> bool:
+    normalized = message.lower().replace("_", "").replace(" ", "").replace("-", "")
+    return "pagetoken" in normalized and any(
+        word in normalized for word in ("invalid", "expired", "incorrect")
+    )
+
+
+async def _check_search_response(response: httpx.Response) -> None:
+    if (response.request.url.path.endswith("/entities:search")
+            and response.status_code in (400, 422)):
+        await response.aread()
+        if _rejects_page_token(response.text):
+            raise InvalidPageToken("Mercari rejected the page token")
+
+
 @dataclass
 class SearchItem:
     """The small slice of a Mercari listing that Phase 1 needs."""
@@ -59,6 +80,13 @@ class SearchItem:
     url: str
     item_type: Optional[str] = None  # e.g. ITEM_TYPE_BEYOND for Mercari Shops
     published_at: Optional[str] = None  # listing publish time, "YYYY-MM-DD HH:MM:SS"
+    created_epoch: float | None = None
+
+
+@dataclass
+class SearchPage:
+    items: list[SearchItem]
+    next_page_token: str | None
 
 
 @dataclass
@@ -87,6 +115,7 @@ def _to_search_item(raw) -> SearchItem:
         url=f"{base}{raw.id_}",
         item_type=raw.item_type,
         published_at=published,
+        created_epoch=raw.created.timestamp() if raw.created else None,
     )
 
 
@@ -136,9 +165,20 @@ class MercariClient:
     per runtime, so this class owns a single instance.
     """
 
-    def __init__(self, timeout: float = 15.0) -> None:
-        self._http = httpx.AsyncClient(timeout=timeout)
+    def __init__(self, timeout: float = 15.0, *, budget: RequestBudget | None = None) -> None:
+        self._budget = budget
+        self._http = httpx.AsyncClient(
+            timeout=timeout, event_hooks={"response": [_check_search_response]},
+        )
         self._mercapi = Mercapi(httpx_client=self._http)
+
+    async def _request(self, call, *args, **kwargs):
+        # Acquire before mercapi creates and timestamps the signed request.
+        if self._budget is None:
+            check_request()
+        else:
+            await self._budget.acquire()
+        return await call(*args, **kwargs)
 
     async def search_products(
         self,
@@ -164,40 +204,52 @@ class MercariClient:
         so they are handled locally by Level 1 (app.filter).
         """
         items: list[SearchItem] = []
-        page_token: Optional[str] = None
+        token = None
         for _ in range(max_pages):
-            results = None
-            for attempt in range(len(RETRY_DELAYS) + 1):
-                if attempt:
-                    await asyncio.sleep(RETRY_DELAYS[attempt - 1])
-                try:
-                    results = await self._mercapi.search(
-                        query,
-                        price_min=min_price,
-                        price_max=max_price,
-                        exclude=exclude,
-                        status=[SearchRequestData.Status.STATUS_ON_SALE],
-                        page_token=page_token,
-                    )
-                    break
-                except Exception as exc:
-                    retryable = _is_transient_network_error(exc)
-                    if not retryable or attempt == len(RETRY_DELAYS):
-                        raise MercariError(
-                            f"Mercari search failed: {type(exc).__name__}: {exc}"
-                        ) from exc
-                    log.warning(
-                        "Mercari search attempt %d/%d failed (%s) — retrying in %.0fs",
-                        attempt + 1,
-                        len(RETRY_DELAYS) + 1,
-                        type(exc).__name__,
-                        RETRY_DELAYS[attempt - 1],
-                    )
-            items.extend(_to_search_item(item) for item in results.items)
-            page_token = results.meta.next_page_token
-            if not page_token:
+            page = await self.search_page(
+                query, min_price=min_price, max_price=max_price, exclude=exclude,
+                page_token=token, newest_first=False,
+            )
+            items.extend(page.items)
+            token = page.next_page_token
+            if not token:
                 break
         return items
+
+    async def search_page(
+        self, query: str, *, page_token: str | None = None,
+        min_price: int | None = None, max_price: int | None = None,
+        exclude: str | None = None, newest_first: bool = True,
+    ) -> SearchPage:
+        sort = SearchRequestData.SortBy
+        for attempt in range(len(RETRY_DELAYS) + 1):
+            try:
+                results = await self._request(
+                    self._mercapi.search, query, price_min=min_price, price_max=max_price, exclude=exclude,
+                    status=[SearchRequestData.Status.STATUS_ON_SALE],
+                    sort_by=sort.SORT_CREATED_TIME if newest_first else sort.SORT_SCORE,
+                    sort_order=SearchRequestData.SortOrder.ORDER_DESC,
+                    page_token=page_token,
+                )
+                return SearchPage(
+                    [_to_search_item(item) for item in results.items],
+                    results.meta.next_page_token or None,
+                )
+            except (InvalidPageToken, RequestDeferred):
+                raise
+            except Exception as exc:
+                # Mercapi exposes parsing failures rather than raw response
+                # statuses. Only reset when the error names the page token.
+                if page_token and _rejects_page_token(str(exc)):
+                    raise InvalidPageToken(str(exc)) from exc
+                if not _is_transient_network_error(exc) or attempt == len(RETRY_DELAYS):
+                    raise MercariError(
+                        f"Mercari search failed: {type(exc).__name__}: {exc}"
+                    ) from exc
+                delay = RETRY_DELAYS[attempt]
+                log.warning("Mercari search attempt %d failed (%s), retry in %.0fs",
+                            attempt + 1, type(exc).__name__, delay)
+                await asyncio.sleep(delay)
 
     async def get_item_details(
         self, item_id: str, item_type: Optional[str] = None
@@ -212,21 +264,64 @@ class MercariClient:
         raises KeyError('data') there. So BEYOND ids are routed straight
         to the shops API — the same dispatch mercapi's own full_item() uses.
         """
+        full = await self._get_listing(item_id, item_type)
+        return None if full is None else _to_item_detail(full)
+
+    async def get_current_listing(
+        self, item_id: str, item_type: str | None = None,
+    ) -> tuple[int | None, ItemDetail] | None:
+        """Return live price and details, or None for a confirmed unavailable listing."""
+        full = await self._get_listing(item_id, item_type, require_confirmed_missing=True)
+        if full is None:
+            return None
+        try:
+            if isinstance(full, Item):
+                status = (full.status or "").lower().removeprefix("item_status_")
+                if status in {"sold_out", "trading", "stop", "closed", "deleted", "cancel"}:
+                    return None
+                if status != "on_sale":
+                    raise ValueError("unknown item sale status")
+                raw_price = full.price
+            else:
+                variants = full.product_detail.variants if full.product_detail else None
+                if not variants:
+                    raise ValueError("missing Shops inventory")
+                quantities = [int(variant.quantity) for variant in variants]
+                if any(quantity < 0 for quantity in quantities):
+                    raise ValueError("invalid Shops inventory")
+                if not any(quantities):
+                    return None
+                raw_price = full.price
+            price = int(raw_price) if raw_price is not None else None
+            if price == 9_999_999 and isinstance(full, Item):
+                price = None  # Mercari's no-price placeholder
+            detail = _to_item_detail(full)
+            if (price is not None and price < 0) or not detail.title.strip():
+                raise ValueError("invalid listing price or title")
+            return price, detail
+        except (AttributeError, TypeError, ValueError, OverflowError) as exc:
+            raise MercariError(f"Cannot verify listing {item_id}: {exc}") from exc
+
+    async def _get_listing(
+        self, item_id: str, item_type: str | None, *, require_confirmed_missing: bool = False,
+    ) -> Item | Product | None:
         if item_type == "ITEM_TYPE_BEYOND":
             try:
-                full = await self._mercapi.product(item_id)
+                full = await self._request(self._mercapi.product, item_id)
+            except RequestDeferred:
+                raise
             except Exception as exc:
                 raise MercariError(
                     f"Mercari product fetch failed: {type(exc).__name__}: {exc}"
                 ) from exc
-            return None if full is None else _to_item_detail(full)
+            return full
 
         try:
-            full = await self._mercapi.item(item_id)
-            if full is None:
+            full = await self._request(self._mercapi.item, item_id)
+            if full is None and (not require_confirmed_missing or item_type != "ITEM_TYPE_MERCARI"):
                 # Not a regular item (or sold) — try the Mercari Shops API.
-                full = await self._mercapi.product(item_id)
-        except KeyError:
+                full = await self._request(self._mercapi.product, item_id)
+        except KeyError as exc:
             # items/get answered without a "data" key: either a transient
             # error response (rate limit / interrupted request — the next
             # scan retries) or a Shops listing mislabeled as
@@ -238,16 +333,22 @@ class MercariClient:
                 item_id,
             )
             try:
-                full = await self._mercapi.product(item_id)
-            except Exception:
+                full = await self._request(self._mercapi.product, item_id)
+            except RequestDeferred:
+                raise
+            except Exception as fallback_error:
+                if require_confirmed_missing:
+                    raise MercariError(f"Cannot verify listing {item_id}") from fallback_error
                 full = None
+            if full is None and require_confirmed_missing:
+                raise MercariError(f"Cannot verify listing {item_id}") from exc
+        except RequestDeferred:
+            raise
         except Exception as exc:
             raise MercariError(
                 f"Mercari item fetch failed: {type(exc).__name__}: {exc}"
             ) from exc
-        if full is None:
-            return None
-        return _to_item_detail(full)
+        return full
 
     async def close(self) -> None:
         await self._http.aclose()

@@ -2,6 +2,7 @@
 
 import asyncio
 import smtplib
+import ssl
 
 import pytest
 
@@ -22,13 +23,15 @@ def run(coro):
 
 class FakeSMTP:
     instances = []
+    connection_error = None
     login_error = None
     send_error = None
 
-    def __init__(self, host, port, timeout=None):
+    def __init__(self, host, port, timeout=None, *, context=None):
         self.host = host
         self.port = port
         self.timeout = timeout
+        self.context = context
         self.login_calls = 0
         self.send_calls = 0
         self.quit_calls = 0
@@ -36,6 +39,8 @@ class FakeSMTP:
         self.login_args = None
         self.sent_message = None
         FakeSMTP.instances.append(self)
+        if FakeSMTP.connection_error is not None:
+            raise FakeSMTP.connection_error
 
     def __enter__(self):
         return self
@@ -72,6 +77,7 @@ class FakeSMTP:
 @pytest.fixture(autouse=True)
 def fake_smtp(monkeypatch):
     FakeSMTP.instances.clear()
+    FakeSMTP.connection_error = None
     FakeSMTP.login_error = None
     FakeSMTP.send_error = None
     monkeypatch.setattr(smtplib, "SMTP_SSL", FakeSMTP)
@@ -107,6 +113,17 @@ def test_batch_subject_format():
     assert build_batch_subject("Built to Spill", 3) == "Mercari 新商品提醒｜Built to Spill｜3 件"
 
 
+def test_quit_failure_after_acceptance_does_not_retry(smtp_env, monkeypatch):
+    def fail_quit(self):
+        raise smtplib.SMTPServerDisconnected("connection dropped after DATA")
+
+    monkeypatch.setattr(FakeSMTP, "quit", fail_quit)
+    run(send_batch("CD", [make_item()], message_id="<stable@example.test>"))
+    server, = FakeSMTP.instances
+    assert server.sent_message["Message-ID"] == "<stable@example.test>"
+    assert server.send_calls == server.close_calls == 1
+
+
 def test_batch_body_contains_all_items():
     items = [make_item("m1", "One", 1000), make_item("m2", "Two", 2000)]
     body = build_batch_body("Built to Spill", items)
@@ -137,6 +154,9 @@ def test_send_batch_one_item_single_connection(smtp_env):
     server = FakeSMTP.instances[0]
     assert server.host == "smtp.qq.com"
     assert server.port == 465
+    assert server.context is not None
+    assert server.context.verify_mode == ssl.CERT_REQUIRED
+    assert server.context.check_hostname
     assert server.login_calls == 1
     assert server.send_calls == 1
     assert server.quit_calls == 1
@@ -163,6 +183,19 @@ def test_send_batch_missing_config(no_smtp_env):
     with pytest.raises(RuntimeError):
         run(send_batch("q", [make_item()]))
     assert FakeSMTP.instances == []
+
+
+def test_send_batch_certificate_failure_prevents_login(smtp_env):
+    certificate_error = ssl.SSLCertVerificationError("certificate verification failed")
+    FakeSMTP.connection_error = certificate_error
+
+    with pytest.raises(RuntimeError, match="SSLCertVerificationError") as exc_info:
+        run(send_batch("q", [make_item()]))
+
+    server, = FakeSMTP.instances
+    assert server.login_calls == 0
+    assert server.send_calls == 0
+    assert exc_info.value.__cause__ is certificate_error
 
 
 def test_send_batch_login_failure(smtp_env):

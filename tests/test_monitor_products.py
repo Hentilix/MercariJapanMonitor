@@ -175,7 +175,7 @@ def test_ignored_products_cascade_on_monitor_delete(tmp_path):
 
 # ------------------------------------------------- Phase 5.3-A: matched flag
 def test_unmatched_record_is_processed_but_not_in_history(tmp_path):
-    """DeepSeek=false: processed (never re-judged), invisible in history."""
+    """A rejection has a decision row and is excluded by the default history filter."""
     db, (a_id, _) = make_db(tmp_path)
     db.add_monitor_product(
         a_id, mercari_id="mX", title="T", price=1, url="u", matched=False

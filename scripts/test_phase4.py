@@ -28,9 +28,10 @@ import httpx  # noqa: E402
 
 from app.database import Database  # noqa: E402
 from app.deepseek import judge_item  # noqa: E402
-from app.email import make_match_notifier  # noqa: E402
+from app.outbox import MailOutbox  # noqa: E402
 from app.mercari import MercariClient  # noqa: E402
 from app.scanner import scan_monitor  # noqa: E402
+from app.single_instance import InstanceLock  # noqa: E402
 
 TEST_DB = Path(__file__).resolve().parents[1] / "data" / "phase4_test.db"
 MONITOR_NAME = "Phase4 Test Monitor"
@@ -79,31 +80,43 @@ async def main() -> int:
         print('Set it first, e.g. PowerShell:  $env:DEEPSEEK_API_KEY_FOR_MJM = "sk-..."')
         return 1
 
+    TEST_DB.parent.mkdir(parents=True, exist_ok=True)
+    lock = InstanceLock(TEST_DB.with_suffix(".db.lock"))
+    if not lock.acquire():
+        log.error("The Phase 4 test database is already in use")
+        return 1
+    try:
+        return await run_scan(args.limit)
+    finally:
+        lock.release()
+
+
+async def run_scan(limit: int) -> int:
     db = Database(TEST_DB)
     client = MercariClient()
     mon = ensure_monitor(db)
+    outbox = MailOutbox(db)
+    outbox.recover()
     try:
         async with httpx.AsyncClient(timeout=30.0) as ai_http:
             async def judge(detail):
                 return await judge_item(ai_http, mon.ai_requirement, detail)
-
-            # None when SMTP env vars are missing -> matches are not emailed.
-            notifier = make_match_notifier(
-                label=mon.name, recipient=mon.notification_email
-            )
 
             result = await scan_monitor(
                 client,
                 db,
                 mon,
                 judge=judge,
-                notifier=notifier,
-                max_pages=2,
-                ai_limit=args.limit,
+                outbox=outbox,
+                adaptive=True,
+                ai_limit=limit,
             )
     finally:
-        db.close()
-        await client.close()
+        try:
+            await outbox.drain_due()
+        finally:
+            db.close()
+            await client.close()
 
     print("\n" + "=" * 40)
     print(f"Found: {result.found}")

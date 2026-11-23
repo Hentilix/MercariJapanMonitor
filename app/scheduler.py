@@ -7,6 +7,9 @@ Mercari / DeepSeek / SMTP / filtering.
 
 import asyncio
 import logging
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
+from enum import Enum
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.base import BaseTrigger
@@ -66,10 +69,23 @@ class ScanScheduler:
         self._scheduler.shutdown(wait=False)
 
 
+class ScanStatus(Enum):
+    COMPLETED = "completed"
+    FAILED = "failed"
+    ALREADY_RUNNING = "already_running"
+    INVALIDATED = "invalidated"
+
+
+@dataclass(frozen=True)
+class ScanOutcome:
+    status: ScanStatus
+    summary: str | None = None
+
+
 class MonitorScheduler:
     """One APScheduler job per monitor (Phase 5.3-B).
 
-    scan_func: async callable(monitor_id) -> None
+    scan_func returns the saved summary, or None if the result was invalidated.
 
     * schedule(monitor): create / reschedule / remove the job to match the
       monitor's enabled flag and interval_minutes. Job id: "monitor-{id}".
@@ -83,7 +99,7 @@ class MonitorScheduler:
     * stop() pauses, waits for in-flight scans, then shuts down.
     """
 
-    def __init__(self, scan_func) -> None:
+    def __init__(self, scan_func: Callable[[int], Awaitable[str | None]]) -> None:
         self._scan_func = scan_func
         self._tasks: dict[int, asyncio.Task] = {}
         self._scheduler = AsyncIOScheduler()
@@ -91,17 +107,22 @@ class MonitorScheduler:
     def job_id(self, monitor_id: int) -> str:
         return f"monitor-{monitor_id}"
 
-    async def _run(self, monitor_id: int) -> None:
-        if monitor_id in self._tasks:
+    async def run_monitor_now(self, monitor_id: int) -> ScanOutcome:
+        if self.is_running(monitor_id):
             log.info("Monitor %s 本次扫描跳过：上一次扫描尚未结束", monitor_id)
-            return
+            return ScanOutcome(ScanStatus.ALREADY_RUNNING)
         self._tasks[monitor_id] = asyncio.current_task()
         log.info("Monitor %s 开始扫描", monitor_id)
         try:
-            await self._scan_func(monitor_id)
+            summary = await self._scan_func(monitor_id)
+            if summary is None:
+                log.info("Monitor %s 本次扫描无可用结果", monitor_id)
+                return ScanOutcome(ScanStatus.INVALIDATED)
             log.info("Monitor %s 扫描完成", monitor_id)
+            return ScanOutcome(ScanStatus.COMPLETED, summary)
         except Exception as exc:
             log.exception("Monitor %s 扫描失败: %s", monitor_id, exc)
+            return ScanOutcome(ScanStatus.FAILED)
         finally:
             self._tasks.pop(monitor_id, None)
 
@@ -132,7 +153,7 @@ class MonitorScheduler:
             )
         else:
             self._scheduler.add_job(
-                self._run,
+                self.run_monitor_now,
                 trigger,
                 args=[monitor.id],
                 id=job_id,
@@ -199,14 +220,6 @@ class MonitorScheduler:
                         monitor.interval_minutes,
                     )
                     asyncio.create_task(self.run_monitor_now(monitor.id))
-
-    async def run_monitor_now(self, monitor_id: int) -> bool:
-        """Run one scan immediately. False when one is already running."""
-        if self.is_running(monitor_id):
-            log.info("Monitor %s 本次扫描跳过：上一次扫描尚未结束", monitor_id)
-            return False
-        await self._run(monitor_id)
-        return True
 
     async def stop(self) -> None:
         """Pause, wait for in-flight scans, then shut down.

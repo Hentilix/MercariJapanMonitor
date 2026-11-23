@@ -1,77 +1,79 @@
-"""Wiring-layer tests for main.py's judge construction (P0-2 fix).
+"""Offline regression tests through the application's scan entry point."""
 
-The scanner unit tests inject the judge directly, so they could never catch
-main.py wiring judge=None when the DeepSeek key is missing — which the old
-code silently turned into "match everything". These tests pin the wiring
-contract:
+import sqlite3
+from unittest.mock import AsyncMock, Mock
 
-  * ai_requirement non-empty -> a judge is ALWAYS built (the API key is
-    checked inside judge_item() per call; a missing key becomes per-item AI
-    errors, never a silent match-all).
-  * ai_requirement empty    -> judge=None (pure Level 1, no-AI gate).
+import httpx
 
-Importing main is offline-safe (ui.run() lives in the guarded block).
-"""
+import pytest
 
-import asyncio
-
-import main as main_module
-
-from app.database import Monitor
+import main
+from app.database import Database
+from app.deepseek import DeepSeekClient
+from app.email import ENV_KEYS
+from app.mercari import ItemDetail, SearchItem, SearchPage
+from app.outbox import MailOutbox
+from app.request_budget import RequestBudget
 
 
-def make_monitor(ai_requirement: str) -> Monitor:
-    return Monitor(
-        id=1,
-        name="M",
-        keywords="kw",
-        keyword_mode="AND",
-        min_price=None,
-        max_price=None,
-        filter_words="",
-        ai_requirement=ai_requirement,
-        interval_minutes=30,
-        notification_email=None,
-        enabled=True,
-        last_scan_at=None,
-        last_result=None,
-        created_at="",
-        updated_at="",
+def test_startup_releases_instance_lock_when_database_migration_fails(monkeypatch):
+    lock = Mock()
+    monkeypatch.setattr(main, "InstanceLock", lambda: lock)
+    monkeypatch.setattr(main, "setup_logging", lambda: None)
+    monkeypatch.setattr(main, "Database", Mock(side_effect=sqlite3.OperationalError("migration failed")))
+    monkeypatch.delenv("MJM_MERCARI_REQUESTS_PER_MINUTE", raising=False)
+    monkeypatch.delenv("MJM_DEEPSEEK_REQUESTS_PER_MINUTE", raising=False)
+
+    with pytest.raises(sqlite3.OperationalError, match="migration failed"):
+        main.main()
+    lock.release.assert_called_once_with()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("key", [None, "   "])
+async def test_missing_key_keeps_discovering_without_fetching_details(monkeypatch, key):
+    if key is None:
+        monkeypatch.delenv("DEEPSEEK_API_KEY_FOR_MJM", raising=False)
+    else:
+        monkeypatch.setenv("DEEPSEEK_API_KEY_FOR_MJM", key)
+    for name in ENV_KEYS:
+        monkeypatch.setenv(name, "test@example.test")
+    db = Database(":memory:")
+    monitor_id = db.create_monitor(name="CD", keywords="CD", ai_requirement="must be a CD")
+    item = SearchItem("m1", "CD", 100, "https://example.test", created_epoch=4_000_000_000)
+    client = AsyncMock()
+    client.search_page.return_value = SearchPage([item], None)
+    client.get_item_details.return_value = ItemDetail("CD", "album", None, None)
+    ai_http = AsyncMock()
+    scan = main.make_scan_handler(
+        db, client, DeepSeekClient(ai_http, RequestBudget(30)), MailOutbox(db),
     )
+    monkeypatch.setattr("app.scanner.time", lambda: 1000)
+    try:
+        summary = await scan(monitor_id)
+        assert summary is not None
+        assert summary == db.get_monitor(monitor_id).last_result
+        monkeypatch.setattr("app.scanner.time", lambda: 1301)
+        await scan(monitor_id)
 
+        assert client.search_page.await_count == 2
+        client.get_item_details.assert_not_awaited()
+        ai_http.post.assert_not_awaited()
+        assert db.pending_candidates(monitor_id) == 1
+        assert db.product_decision(monitor_id, "m1") is None
+        assert db.mail_status(monitor_id).pending == 0
+        assert "缺少 DeepSeek API Key" in db.get_monitor(monitor_id).last_result
 
-class _FakeDB:
-    def __init__(self, monitor: Monitor) -> None:
-        self._monitor = monitor
-
-    def get_monitor(self, monitor_id: int) -> Monitor:
-        return self._monitor
-
-
-class _FakeClient:
-    pass
-
-
-def _run_scan_monitor(monkeypatch, ai_requirement: str) -> dict:
-    """Run main.scan_monitor(1) with stubbed globals; capture scan kwargs."""
-    captured = {}
-
-    async def fake_run_monitor_scan(client, db, mon, *, judge, notifier, max_pages):
-        captured["judge"] = judge
-
-    monkeypatch.setattr(main_module, "db", _FakeDB(make_monitor(ai_requirement)), raising=False)
-    monkeypatch.setattr(main_module, "client", _FakeClient(), raising=False)
-    monkeypatch.setattr(main_module, "ai_http", object(), raising=False)
-    monkeypatch.setattr(main_module, "run_monitor_scan", fake_run_monitor_scan)
-    asyncio.run(main_module.scan_monitor(1))
-    return captured
-
-
-def test_judge_is_built_when_ai_requirement_present(monkeypatch):
-    captured = _run_scan_monitor(monkeypatch, "必须是全新正版日版 CD，带 OBI")
-    assert captured["judge"] is not None
-
-
-def test_judge_is_none_when_no_ai_requirement(monkeypatch):
-    captured = _run_scan_monitor(monkeypatch, "")
-    assert captured["judge"] is None
+        monkeypatch.setenv("DEEPSEEK_API_KEY_FOR_MJM", "new-key")
+        ai_http.post.return_value = httpx.Response(
+            200, json={"choices": [{"message": {"content": "true"}}]},
+        )
+        await scan(monitor_id)
+        await scan(monitor_id)
+        client.get_item_details.assert_awaited_once()
+        ai_http.post.assert_awaited_once()
+        assert db.product_decision(monitor_id, "m1") == (1, 1)
+        assert db.pending_candidates(monitor_id) == 0
+        assert db.mail_status(monitor_id).pending == 1
+    finally:
+        db.close()

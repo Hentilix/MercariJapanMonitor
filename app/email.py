@@ -20,7 +20,9 @@ import asyncio
 import logging
 import os
 import smtplib
+import ssl
 from email.message import EmailMessage
+from contextlib import suppress
 
 from app.mercari import SearchItem
 
@@ -100,13 +102,25 @@ def build_batch_body(label: str, items: list[SearchItem]) -> str:
 
 
 def _send_sync(msg: EmailMessage, config: dict) -> None:
-    with smtplib.SMTP_SSL(config["host"], config["port"], timeout=30) as server:
+    server = smtplib.SMTP_SSL(
+        config["host"], config["port"], timeout=30, context=ssl.create_default_context(),
+    )
+    try:
         server.login(config["username"], config["password"])
-        server.send_message(msg)
+        refused = server.send_message(msg)
+        if refused:
+            raise smtplib.SMTPRecipientsRefused(refused)
+    finally:
+        # QUIT cannot undo an accepted DATA command.
+        with suppress(smtplib.SMTPException, OSError):
+            server.quit()
+        with suppress(OSError):
+            server.close()
 
 
 async def send_batch(
-    label: str, items: list[SearchItem], recipient: str | None = None
+    label: str, items: list[SearchItem], recipient: str | None = None,
+    *, message_id: str | None = None,
 ) -> None:
     """Send ONE summary email containing all matched items.
 
@@ -130,6 +144,8 @@ async def send_batch(
         build_batch_subject(label, len(items)),
         build_batch_body(label, items),
     )
+    if message_id is not None:
+        msg["Message-ID"] = message_id
     try:
         await asyncio.to_thread(_send_sync, msg, config)
     except (smtplib.SMTPException, OSError) as exc:

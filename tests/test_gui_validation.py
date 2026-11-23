@@ -1,22 +1,14 @@
-"""Offline tests for the GUI form validation/parsing helpers (main.py).
-
-No NiceGUI interaction — the helpers are pure functions. Importing main is
-offline-safe (it only defines globals; ui.run() lives in the guarded block).
-"""
+"""Offline tests for GUI helpers and the application log filter."""
 
 import pytest
 
-import main
-from main import (
-    calculate_total_pages,
-    clamp_page,
-    config_status_text,
-    deepseek_status_text,
+from app.ui.history import HISTORY_FILTER_VALUES, calculate_total_pages, clamp_page
+from app.ui.monitors import (
     monitor_fields_from_form,
     parse_price,
-    smtp_status_text,
     validate_monitor_form,
 )
+from app.ui.settings import config_status_text, deepseek_status_text, smtp_status_text
 
 
 # ------------------------------------------------------------------ 测试 1/3/4/5/6
@@ -36,9 +28,15 @@ def test_empty_name_blocked():
     assert error is not None and "名称" in error
 
 
-def test_empty_keywords_blocked():
-    error = validate_monitor_form("A", "  ", None, None, "AND", "req")
-    assert error is not None and "关键词" in error
+@pytest.mark.parametrize("keywords", ["", "  ", ",", "，，", " , ， , "])
+def test_empty_keywords_blocked(keywords):
+    error = validate_monitor_form("A", keywords, None, None, "AND", "req")
+    assert error == "请至少填写一个搜索关键词。"
+
+
+@pytest.mark.parametrize("keywords", ["，CD,,", "Built to Spill"])
+def test_nonempty_keyword_list_passes(keywords):
+    assert validate_monitor_form("A", keywords, None, None, "AND", "req") is None
 
 
 def test_empty_ai_requirement_blocked():
@@ -250,6 +248,4 @@ def test_other_log_records_pass_the_filter():
 
 # ------------------------------------------- 历史页过滤选项 (方案 A)
 def test_history_filter_values_mapping():
-    from main import HISTORY_FILTER_VALUES
-
     assert HISTORY_FILTER_VALUES == {"matched": 1, "rejected": 0, "all": None}

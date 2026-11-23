@@ -145,6 +145,49 @@ def make_product(**overrides) -> "Product":
     return Product(**fields)
 
 
+@pytest.mark.parametrize(("stock", "available"), [(["0", "2"], True), (["0"], False), ([], None)])
+def test_current_shops_listing_uses_variant_inventory(monkeypatch, stock, available):
+    product = make_product(
+        display_name="CD",
+        product_detail=make_product_detail(
+            variants=[SimpleNamespace(quantity=value) for value in stock],
+        ),
+    )
+    client = make_client(monkeypatch, FakeMercapi(product_result=product))
+    try:
+        if available is None:
+            with pytest.raises(MercariError, match="missing Shops inventory"):
+                run(client.get_current_listing("shop", "ITEM_TYPE_BEYOND"))
+        else:
+            listing = run(client.get_current_listing("shop", "ITEM_TYPE_BEYOND"))
+            if available:
+                price, detail = listing
+                assert (price, detail.title) == (1194, "CD")
+            else:
+                assert listing is None
+    finally:
+        run(client.close())
+
+
+@pytest.mark.parametrize(("status", "available"), [("on_sale", True), ("sold_out", False)])
+def test_current_regular_listing_reads_status_and_price(monkeypatch, status, available):
+    from mercapi.models import Item
+
+    item = Item.__new__(Item)
+    item.status, item.name, item.price = status, "CD", 100
+    item.description = item.item_condition = item.item_category = None
+    client = make_client(monkeypatch, FakeMercapi(item_result=item))
+    try:
+        listing = run(client.get_current_listing("m1", "ITEM_TYPE_MERCARI"))
+        if available:
+            price, detail = listing
+            assert (price, detail.title) == (100, "CD")
+        else:
+            assert listing is None
+    finally:
+        run(client.close())
+
+
 def test_product_detail_uses_display_name_for_title():
     from mercapi.models.product import ProductDetail
 

@@ -1,6 +1,7 @@
 """Offline tests for the monitors table (Phase 5.2 schema) + migrations."""
 
 import sqlite3
+from pathlib import Path
 
 import pytest
 
@@ -79,11 +80,28 @@ def test_create_monitor_defaults(tmp_path):
 
 
 def test_monitor_name_must_be_unique(tmp_path):
-    db = Database(tmp_path / "test.db")
-    db.create_monitor(name="Same", keywords="q1")
-    with pytest.raises(sqlite3.IntegrityError):
-        db.create_monitor(name="Same", keywords="q2")
-    db.close()
+    path = tmp_path / "test.db"
+    db = Database(path)
+    try:
+        monitor_id = db.create_monitor(**FIELDS)
+        snapshot = db.get_monitor(monitor_id)
+        with pytest.raises(sqlite3.IntegrityError):
+            db.create_monitor(name=FIELDS["name"], keywords="duplicate")
+        assert db.update_monitor(
+            monitor_id, **{**FIELDS, "name": "Renamed", "interval_minutes": 60},
+            expected=snapshot,
+        )
+    finally:
+        db.close()
+
+    db = Database(path)
+    try:
+        mon, = db.list_monitors()
+        assert (mon.id, mon.name, mon.keywords, mon.interval_minutes) == (
+            monitor_id, "Renamed", FIELDS["keywords"], 60,
+        )
+    finally:
+        db.close()
 
 
 def test_get_monitor_by_name(tmp_path):
@@ -167,7 +185,7 @@ def test_migration_idempotent_and_complete(tmp_path):
     conn = db._conn
     tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     assert {"monitors", "monitor_products", "ignored_products"} <= tables
-    assert "products" not in tables  # legacy table fully retired (Phase 5.4-D)
+    assert "products" not in tables  # Fresh databases only get the current schema.
     monitor_columns = {r[1] for r in conn.execute("PRAGMA table_info(monitors)")}
     assert "keywords" in monitor_columns
     assert "keyword_mode" in monitor_columns
@@ -179,9 +197,7 @@ def test_migration_idempotent_and_complete(tmp_path):
     db.close()
 
 
-def test_legacy_products_table_is_dropped_on_open(tmp_path):
-    """Phase 5.4-D: a leftover Phase 2 products table is dropped once,
-    idempotently, without touching the new tables."""
+def test_legacy_products_table_is_preserved_on_open(tmp_path):
     path = tmp_path / "test.db"
     conn = sqlite3.connect(path)
     conn.execute(
@@ -195,23 +211,59 @@ def test_legacy_products_table_is_dropped_on_open(tmp_path):
         )
         """
     )
-    conn.execute(
-        "INSERT INTO products VALUES ('mX', 'old item', 100, 'u', '2026-09-15T10:00:00+08:00')"
-    )
+    legacy_rows = [
+        ("mX", "old item", 100, "u", "2026-09-15T10:00:00+08:00"),
+        ("mY", "item without a price", None, "v", "2026-09-16T10:00:00+08:00"),
+    ]
+    conn.executemany("INSERT INTO products VALUES (?, ?, ?, ?, ?)", legacy_rows)
+    schema_query = "SELECT sql FROM sqlite_schema WHERE type='table' AND name='products'"
+    original_definition = conn.execute(schema_query).fetchone()
     conn.commit()
     conn.close()
 
-    db = Database(path)  # migration runs here
-    tables = {r[0] for r in db._conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-    assert "products" not in tables                       # dropped with its data
-    assert {"monitors", "monitor_products", "ignored_products"} <= tables
-    db.close()
+    db = Database(path)
+    try:
+        assert db._conn.execute(schema_query).fetchone() == original_definition
+        monitor_id = db.create_monitor(name="CD", keywords="CD")
+    finally:
+        db.close()
 
-    Database(path).close()  # second open: nothing to drop, must not fail
+    db = Database(path)
+    try:
+        assert db._conn.execute(schema_query).fetchone() == original_definition
+        assert db._conn.execute("SELECT * FROM products ORDER BY mercari_id").fetchall() == legacy_rows
+        assert db.list_monitor_products(monitor_id, matched=None) == []
+        assert db.product_decision(monitor_id, "mX") is None
+        assert db.mail_status(monitor_id).pending == 0
+    finally:
+        db.close()
 
 
-def test_old_monitors_table_is_migrated_with_data(tmp_path):
-    """A pre-5.2 monitors table gets rebuilt with mapped data, nothing lost."""
+def test_readme_lists_every_current_table_and_column(tmp_path):
+    readme = (Path(__file__).resolve().parents[1] / "README.md").read_text(encoding="utf-8")
+    schema_section = readme.split("## 数据模型\n", 1)[1].split("\n## ", 1)[0]
+    documented = {}
+    for line in schema_section.splitlines():
+        if line.startswith("| `"):
+            table, columns, _purpose = (part.strip() for part in line.strip("|").split("|"))
+            documented[table.strip("`")] = {column.strip().strip("`") for column in columns.split(",")}
+
+    db = Database(tmp_path / "schema.db")
+    try:
+        actual = {}
+        for (table,) in db._conn.execute(
+            "SELECT name FROM sqlite_schema WHERE type='table' AND name NOT GLOB 'sqlite_*'"
+        ):
+            actual[table] = {
+                column for (column,) in db._conn.execute("SELECT name FROM pragma_table_info(?)", (table,))
+            }
+        assert documented == actual
+    finally:
+        db.close()
+
+
+@pytest.fixture
+def legacy_monitors_path(tmp_path):
     path = tmp_path / "test.db"
     # Build an OLD-schema database by hand.
     conn = sqlite3.connect(path)
@@ -249,8 +301,12 @@ def test_old_monitors_table_is_migrated_with_data(tmp_path):
     )
     conn.commit()
     conn.close()
+    return path
 
-    db = Database(path)  # migration runs here
+
+def test_old_monitors_table_is_migrated_with_data(legacy_monitors_path):
+    """A pre-5.2 monitors table gets rebuilt with mapped data, nothing lost."""
+    db = Database(legacy_monitors_path)
     mon = db.get_monitor_by_name("Test")
     assert mon is not None
     assert mon.keywords == "John Coltrane, A Love Supreme, CD"
@@ -261,4 +317,103 @@ def test_old_monitors_table_is_migrated_with_data(tmp_path):
     assert mon.interval_minutes == 5
     assert mon.notification_email == "chccrimson@gmail.com"
     assert mon.enabled is True
+    db.close()
+
+
+@pytest.fixture
+def staging_definition():
+    schema_source = Database.__new__(Database)
+    schema_source._conn = sqlite3.connect(":memory:")
+    schema_source._migrate_monitors()
+    definition, = schema_source._conn.execute(
+        "SELECT sql FROM sqlite_schema WHERE name='monitors'"
+    ).fetchone()
+    schema_source.close()
+    return definition.replace("CREATE TABLE monitors", "CREATE TABLE monitors_new", 1)
+
+
+def test_duplicate_migration_recovers_empty_staging_and_preserves_links(
+    legacy_monitors_path, staging_definition,
+):
+    with sqlite3.connect(legacy_monitors_path) as conn:
+        conn.execute(staging_definition)
+        conn.executemany(
+            """INSERT INTO monitors (id, name, query, created_at, updated_at)
+               VALUES (?, ?, ?, 'created', 'updated')""",
+            [(5, "Test", "second"), (9, "Test (2)", "existing"), (30, "deleted", "")],
+        )
+        conn.execute("DELETE FROM monitors WHERE id=30")
+        conn.execute(
+            "CREATE TABLE saved_items (monitor_id REFERENCES monitors(id) ON DELETE CASCADE, item TEXT)"
+        )
+        conn.execute("INSERT INTO saved_items VALUES (5, 'listing')")
+    conn.close()
+
+    expected = [(1, "Test"), (5, "Test (3)"), (9, "Test (2)")]
+    for _ in range(2):
+        db = Database(legacy_monitors_path)
+        assert [(mon.id, mon.name) for mon in db.list_monitors()] == expected
+        assert db.get_monitor(5).keywords == "second"
+        assert db.get_monitor(9).keywords == "existing"
+        assert db._conn.execute("SELECT * FROM saved_items").fetchall() == [(5, "listing")]
+        assert db._conn.execute("PRAGMA foreign_key_check").fetchall() == []
+        assert db._conn.execute("SELECT name FROM sqlite_schema WHERE name='monitors_new'").fetchone() is None
+        db.close()
+
+    db = Database(legacy_monitors_path)
+    assert db.create_monitor(name="New", keywords="new") == 31
+    db.delete_monitor(5)
+    assert db._conn.execute("SELECT * FROM saved_items").fetchall() == []
+    db.close()
+
+
+@pytest.mark.parametrize("problem", ["data", "schema"])
+def test_monitor_migration_preserves_unexpected_staging(legacy_monitors_path, staging_definition, problem):
+    if problem == "schema":
+        staging_definition = "CREATE TABLE monitors_new (id INTEGER PRIMARY KEY)"
+    with sqlite3.connect(legacy_monitors_path) as conn:
+        conn.execute(staging_definition)
+        if problem == "data":
+            conn.execute(
+                """INSERT INTO monitors_new
+                       (name, keywords, keyword_mode, ai_requirement, interval_minutes, created_at, updated_at)
+                   VALUES ('Saved', 'CD', 'AND', '', 30, 'created', 'updated')"""
+            )
+        original_rows = conn.execute("SELECT * FROM monitors_new").fetchall()
+    conn.close()
+
+    with pytest.raises(sqlite3.OperationalError, match=f"({problem}).*monitors_new|monitors_new.*({problem})"):
+        Database(legacy_monitors_path)
+    conn = sqlite3.connect(legacy_monitors_path)
+    try:
+        assert conn.execute("SELECT * FROM monitors_new").fetchall() == original_rows
+        assert conn.execute("SELECT name, query FROM monitors WHERE id=1").fetchone()[0] == "Test"
+    finally:
+        conn.close()
+
+
+def test_monitor_migration_rolls_back_failed_table_swap(legacy_monitors_path):
+    db = Database.__new__(Database)
+    db._conn = sqlite3.connect(legacy_monitors_path)
+    try:
+        db._conn.execute("PRAGMA foreign_keys=ON")
+        db._conn.execute("CREATE TABLE saved_items (monitor_id REFERENCES monitors(id) ON DELETE CASCADE)")
+        db._conn.execute("INSERT INTO saved_items VALUES (1)")
+        db._conn.commit()
+        db._conn.set_authorizer(
+            lambda action, *_: sqlite3.SQLITE_DENY if action == sqlite3.SQLITE_ALTER_TABLE else sqlite3.SQLITE_OK
+        )
+        with pytest.raises(sqlite3.DatabaseError, match="not authorized"):
+            db._migrate_monitors()
+        db._conn.set_authorizer(None)
+        assert db._conn.execute("SELECT id FROM monitors").fetchall() == [(1,)]
+        assert db._conn.execute("SELECT * FROM saved_items").fetchall() == [(1,)]
+        assert db._conn.execute("PRAGMA foreign_keys").fetchone() == (1,)
+        assert db._conn.execute("SELECT name FROM sqlite_schema WHERE name='monitors_new'").fetchone() is None
+    finally:
+        db.close()
+
+    db = Database(legacy_monitors_path)
+    assert db.get_monitor(1).name == "Test"
+    assert db._conn.execute("SELECT * FROM saved_items").fetchall() == [(1,)]
     db.close()
