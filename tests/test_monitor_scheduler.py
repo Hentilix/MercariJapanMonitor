@@ -331,3 +331,32 @@ async def test_remove_monitor_only_removes_its_own_job(tmp_path):
     assert scheduler._scheduler.get_job(scheduler.job_id(mon_b.id)) is not None
     await scheduler.stop()
     db.close()
+
+
+@pytest.mark.asyncio
+async def test_stop_waits_for_inflight_scan(tmp_path):
+    db, (monitor,) = make_db(tmp_path, make_monitor_fields("A"))
+    started = asyncio.Event()
+    release = asyncio.Event()
+    finished = asyncio.Event()
+
+    async def scan(monitor_id):
+        started.set()
+        await release.wait()
+        finished.set()
+        return "completed"
+
+    scheduler = MonitorScheduler(scan)
+    scheduler.start([monitor])
+    try:
+        await asyncio.wait_for(started.wait(), timeout=2)
+        stopping = asyncio.create_task(scheduler.stop())
+        await asyncio.sleep(0)
+        assert not stopping.done()
+        release.set()
+        await asyncio.wait_for(stopping, timeout=2)
+        assert finished.is_set()
+    finally:
+        release.set()
+        await scheduler.stop()
+        db.close()

@@ -156,28 +156,3 @@ async def send_batch(
         len(items),
         label,
     )
-
-
-def make_match_notifier(label: str, recipient: str | None = None):
-    """scan_monitor-compatible batch notifier, or None when SMTP is not configured.
-
-    The returned notifier receives the list of AI-matched items of one
-    scan and sends exactly one summary email for all of them.
-
-    `label` is the monitor name (used in the subject/body).
-    `recipient` overrides SMTP_TO for this notifier (monitor-level email).
-
-    None means "email disabled" — the monitor keeps working without SMTP.
-    """
-    missing = [key for key in ENV_KEYS if not os.environ.get(key)]
-    if missing:
-        log.warning(
-            "SMTP not configured — email notifications disabled (missing: %s)",
-            ", ".join(missing),
-        )
-        return None
-
-    async def notify(items: list[SearchItem]) -> None:
-        await send_batch(label, items, recipient=recipient)
-
-    return notify

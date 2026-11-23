@@ -324,3 +324,22 @@ async def test_worker_finishes_current_send_and_skips_deleted_batch(tmp_path, co
         release.set()
         await outbox.stop()
         db.close()
+
+
+@pytest.mark.asyncio
+async def test_rejected_candidate_does_not_queue_mail(configured):
+    db = Database(":memory:")
+    mon = db.get_monitor(db.create_monitor(name="records", keywords="CD", ai_requirement="CD"))
+    client = AsyncMock()
+    client.search_page.return_value = SearchPage([item("A")], None)
+    client.get_item_details.return_value = ItemDetail("CD A", "", None, None)
+    send = AsyncMock()
+    outbox = MailOutbox(db, send=send)
+    try:
+        result = await scan_monitor(client, db, mon, judge=AsyncMock(return_value=False), outbox=outbox)
+        await outbox.drain_due()
+        assert result.ai_rejected == 1
+        assert db.mail_status(mon.id).pending == 0
+        send.assert_not_awaited()
+    finally:
+        db.close()

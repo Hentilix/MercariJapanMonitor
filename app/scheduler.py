@@ -12,61 +12,11 @@ from dataclasses import dataclass
 from enum import Enum
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from apscheduler.triggers.base import BaseTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 
 from app.database import Monitor
 
 log = logging.getLogger(__name__)
-
-
-class ScanScheduler:
-    """Legacy single-job scheduler (Phase 3). Kept for old tests/scripts.
-
-    * max_instances=1 + coalesce=True: a tick never starts while the
-      previous run is still going; missed ticks collapse into one run.
-    * A failed job is logged and the next tick runs as usual — one bad
-      scan never stops the monitor.
-    * stop() pauses scheduling first, waits for the in-flight job to
-      finish, then shuts the scheduler down.
-      (APScheduler 3.11.3's shutdown(wait=True) cancels running jobs
-      instead of waiting, so the wait is done here explicitly.)
-    """
-
-    def __init__(self, job_func, trigger: BaseTrigger) -> None:
-        self._job_func = job_func
-        self._running: asyncio.Task | None = None
-        self._scheduler = AsyncIOScheduler()
-        self._scheduler.add_job(
-            self._run,
-            trigger=trigger,
-            id="mercari_scan",
-            max_instances=1,
-            coalesce=True,
-            misfire_grace_time=60,
-        )
-
-    async def _run(self) -> None:
-        self._running = asyncio.current_task()
-        try:
-            await self._job_func()
-        except Exception:
-            log.exception("Scheduled scan failed")
-        finally:
-            self._running = None
-
-    def start(self) -> None:
-        """Start the scheduler. Must be called inside a running event loop."""
-        self._scheduler.start()
-
-    async def stop(self) -> None:
-        """Pause, wait for the in-flight job, then shut down."""
-        self._scheduler.pause()
-        running = self._running
-        if running is not None and not running.done():
-            log.info("Waiting for the running scan to finish...")
-            await running
-        self._scheduler.shutdown(wait=False)
 
 
 class ScanStatus(Enum):

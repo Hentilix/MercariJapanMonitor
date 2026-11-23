@@ -5,8 +5,6 @@ Fake Mercari client + real SQLite in tmp_path. No network, no DeepSeek, no SMTP.
 
 import asyncio
 
-import pytest
-
 from app.database import Database
 from app.mercari import ItemDetail, MercariError, SearchItem, SearchPage
 from app.scanner import scan_monitor
@@ -88,13 +86,6 @@ def fake_judge(verdicts, calls):
 def make_db(tmp_path, **monitor_overrides):
     db = Database(tmp_path / "test.db")
     return db, make_monitor(db, **monitor_overrides)
-
-
-def make_notifier(batches):
-    async def notifier(items):
-        batches.append([i.id for i in items])
-
-    return notifier
 
 
 # ------------------------------------------------------- monitor independence
@@ -250,71 +241,6 @@ def test_full_item_error_is_retried_next_scan(tmp_path, monkeypatch):
     db.close()
 
 
-# --------------------------------------------------------------------- SMTP
-def test_smtp_failure_does_not_undo_processed_state(tmp_path):
-    db, mon = make_db(tmp_path)
-    client = FakeClient(
-        [make_item("X", "Built to Spill X CD", 1200)],
-        details={"X": make_detail()},
-    )
-    calls = []
-
-    async def notifier(items):
-        raise RuntimeError("smtp down")
-
-    result = run(
-        scan_monitor(
-            client, db, mon,
-            judge=fake_judge([True], calls),
-            notifier=notifier,
-        )
-    )
-    assert result.ai_matched == 1
-    assert result.ai_errors == 0
-    assert db.has_monitor_product(mon.id, "X")  # saved despite email failure
-    db.close()
-
-
-def test_batch_email_sent_once_with_all_matches(tmp_path):
-    db, mon = make_db(tmp_path)
-    client = FakeClient(
-        [make_item(i, f"Built to Spill {i} CD", 1200) for i in ("1", "2", "3")],
-        details={i: make_detail() for i in ("1", "2", "3")},
-    )
-    calls = []
-    batches = []
-    result = run(
-        scan_monitor(
-            client, db, mon,
-            judge=fake_judge([True, True, True], calls),
-            notifier=make_notifier(batches),
-        )
-    )
-    assert result.ai_matched == 3
-    assert batches == [["1", "2", "3"]]  # ONE batch with all three
-    db.close()
-
-
-def test_zero_matches_never_notifies(tmp_path):
-    db, mon = make_db(tmp_path)
-    client = FakeClient(
-        [make_item("X", "Built to Spill X CD", 1200)],
-        details={"X": make_detail()},
-    )
-    calls = []
-    batches = []
-    run(
-        scan_monitor(
-            client, db, mon,
-            judge=fake_judge([False], calls),
-            notifier=make_notifier(batches),
-        )
-    )
-    assert batches == []
-    db.close()
-
-
-# ------------------------------------------------------------------ filters
 def test_and_mode_requires_all_keywords(tmp_path):
     db, mon = make_db(
         tmp_path, keywords="Built to Spill，CD", keyword_mode="AND",
@@ -605,9 +531,8 @@ def test_judge_none_with_ai_requirement_matches_nothing(tmp_path):
             make_item("2", "Built to Spill 2 CD", 1200),
         ]
     )
-    batches = []
     result = run(
-        scan_monitor(client, db, mon, judge=None, notifier=make_notifier(batches))
+        scan_monitor(client, db, mon, judge=None)
     )
     assert result.ai_matched == 0
     assert result.ai_rejected == 0
@@ -615,7 +540,6 @@ def test_judge_none_with_ai_requirement_matches_nothing(tmp_path):
     assert "缺少 DeepSeek API Key" in result.summary
     assert client.detail_calls == []
     assert db.pending_candidates(mon.id) == 2
-    assert batches == []  # no email without a verdict
     assert not db.has_monitor_product(mon.id, "1")
     assert not db.has_monitor_product(mon.id, "2")
 
@@ -714,8 +638,7 @@ def test_zero_candidates_summary_explains_level1_filtering(tmp_path):
             make_item("3", "Built to Spill 3 CD", 4000),  # price over
         ]
     )
-    batches = []
-    result = run(scan_monitor(client, db, mon, notifier=make_notifier(batches)))
+    result = run(scan_monitor(client, db, mon))
 
     assert result.found > 0
     assert result.candidates == 0
@@ -723,7 +646,6 @@ def test_zero_candidates_summary_explains_level1_filtering(tmp_path):
     assert result.already_seen == 0
     assert result.ignored == 0
     assert result.ai_matched == 0
-    assert batches == []  # no email
     assert len(db.list_monitor_products(mon.id)) == 0  # nothing recorded
 
     last = db.get_monitor(mon.id).last_result

@@ -24,9 +24,6 @@ log = logging.getLogger(__name__)
 # A judge receives the extracted detail fields and returns
 # True / False / None (None = error, never a match).
 Judge = Callable[[ItemDetail], Awaitable[bool | None]]
-# A notifier receives ALL AI matches of one scan and sends ONE summary
-# notification (e.g. one email per scan task per round).
-Notifier = Callable[[list[SearchItem]], Awaitable[None]]
 
 
 @dataclass
@@ -53,13 +50,10 @@ async def scan_monitor(
     monitor: Monitor,
     *,
     judge: Judge | DeepSeekJudge | None = None,
-    notifier: Notifier | None = None,
     outbox: MailOutbox | None = None,
     ai_limit: int | None = None,
 ) -> ScanResult:
     """Discover candidates, process due listings, and save the scan summary."""
-    if outbox is not None and notifier is not None:
-        raise ValueError("Choose one notification mechanism")
     if not db.rule_is_current(monitor):
         return ScanResult()
     mail_batch = outbox.new_batch(monitor) if outbox is not None else None
@@ -112,8 +106,6 @@ async def scan_monitor(
         result.ignored,
     )
 
-    matched_items: list[SearchItem] = []
-
     def can_process() -> bool:
         return db.rule_is_current(monitor) and (
             db.search_is_current(monitor.id, coverage.generation)
@@ -137,8 +129,6 @@ async def scan_monitor(
             return
         if matched:
             result.ai_matched += 1
-            if notifier is not None:
-                matched_items.append(item)
             log.info("MATCH: %s | %s | %s", item.id, item.title, _fmt_price(item.price))
         else:
             result.ai_rejected += 1
@@ -205,18 +195,6 @@ async def scan_monitor(
     finally:
         if mail_batch is not None:
             outbox.finish_batch(mail_batch)
-
-    if matched_items and notifier is not None:
-        try:
-            await notifier(matched_items)
-        except Exception as exc:
-            # A failed notification is not an AI error: matches still count
-            # and the scan finishes normally.
-            log.error(
-                "Batch email notification failed (%d item(s)): %s",
-                len(matched_items),
-                exc,
-            )
 
     summary = (
         f"found={result.found}, candidates={result.candidates}, "

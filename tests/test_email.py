@@ -9,7 +9,6 @@ import pytest
 from app.email import (
     build_batch_body,
     build_batch_subject,
-    make_match_notifier,
     send_batch,
 )
 from app.mercari import SearchItem
@@ -222,31 +221,6 @@ def test_password_never_logged_on_failure(smtp_env, caplog):
     assert "secret-auth-code" not in caplog.text
 
 
-# ---------------------------------------------------------------- notifier
-def test_make_notifier_none_without_config(no_smtp_env):
-    assert make_match_notifier("q") is None
-
-
-def test_make_notifier_sends_one_batch_email(smtp_env):
-    notifier = make_match_notifier("Built to Spill")
-    assert notifier is not None
-    run(notifier([make_item("m1", "One"), make_item("m2", "Two")]))
-    assert len(FakeSMTP.instances) == 1
-    server = FakeSMTP.instances[-1]
-    assert server.sent_message["Subject"] == "Mercari 新商品提醒｜Built to Spill｜2 件"
-    content = server.sent_message.get_content()
-    assert "One" in content and "Two" in content
-
-
-def test_make_notifier_recipient_override(smtp_env):
-    notifier = make_match_notifier("q", recipient="chccrimson@gmail.com")
-    assert notifier is not None
-    run(notifier([make_item()]))
-    assert FakeSMTP.instances[-1].sent_message["To"] == "chccrimson@gmail.com"
-
-
-def test_make_notifier_default_recipient_from_env(smtp_env):
-    notifier = make_match_notifier("q")  # no override -> SMTP_TO
-    assert notifier is not None
-    run(notifier([make_item()]))
-    assert FakeSMTP.instances[-1].sent_message["To"] == "hentilixrivery@outlook.com"
+def test_send_batch_recipient_override(smtp_env):
+    run(send_batch("q", [make_item()], recipient="override@example.test"))
+    assert FakeSMTP.instances[-1].sent_message["To"] == "override@example.test"
