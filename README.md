@@ -841,7 +841,8 @@ MercariJapanMonitor/
 │   ├── ui/              NiceGUI 任务、设置、历史与忽略列表
 │   ├── mercari.py       Mercari 搜索与详情请求
 │   ├── filter.py        Level 1 本地过滤
-│   ├── database.py      SQLite 迁移与数据访问
+│   ├── database.py      SQLite 数据访问与事务
+│   ├── migrations.py    SQLite 建表与旧库升级
 │   ├── coverage.py      翻页、补扫与候选发现
 │   ├── scanner.py       单个任务的扫描流程
 │   ├── scheduler.py     APScheduler 调度

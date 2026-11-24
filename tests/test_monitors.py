@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from app.database import Database, Monitor, split_keywords
+from app.migrations import _migrate_monitors, migrate
 
 FIELDS = dict(
     name="Built to Spill CD",
@@ -322,13 +323,15 @@ def test_old_monitors_table_is_migrated_with_data(legacy_monitors_path):
 
 @pytest.fixture
 def staging_definition():
-    schema_source = Database.__new__(Database)
-    schema_source._conn = sqlite3.connect(":memory:")
-    schema_source._migrate_monitors()
-    definition, = schema_source._conn.execute(
-        "SELECT sql FROM sqlite_schema WHERE name='monitors'"
-    ).fetchone()
-    schema_source.close()
+    conn = sqlite3.connect(":memory:")
+    try:
+        # Capture the staging shape before later upgrades add columns.
+        _migrate_monitors(conn)
+        definition, = conn.execute(
+            "SELECT sql FROM sqlite_schema WHERE name='monitors'"
+        ).fetchone()
+    finally:
+        conn.close()
     return definition.replace("CREATE TABLE monitors", "CREATE TABLE monitors_new", 1)
 
 
@@ -404,7 +407,7 @@ def test_monitor_migration_rolls_back_failed_table_swap(legacy_monitors_path):
             lambda action, *_: sqlite3.SQLITE_DENY if action == sqlite3.SQLITE_ALTER_TABLE else sqlite3.SQLITE_OK
         )
         with pytest.raises(sqlite3.DatabaseError, match="not authorized"):
-            db._migrate_monitors()
+            migrate(db._conn)
         db._conn.set_authorizer(None)
         assert db._conn.execute("SELECT id FROM monitors").fetchall() == [(1,)]
         assert db._conn.execute("SELECT * FROM saved_items").fetchall() == [(1,)]
