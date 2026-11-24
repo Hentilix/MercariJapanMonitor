@@ -343,3 +343,40 @@ async def test_rejected_candidate_does_not_queue_mail(configured):
         send.assert_not_awaited()
     finally:
         db.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("first_price", "second_price", "first_title", "matched"), [
+    (200, 90, "CD album", True),
+    (90, 200, "CD album", False),
+    (90, 90, "CD album broken", True),
+    (90, 90, "CD album", True),
+])
+async def test_later_or_page_controls_match_and_mail(
+    configured, first_price, second_price, first_title, matched,
+):
+    db = Database(":memory:")
+    try:
+        mon = db.get_monitor(db.create_monitor(
+            name="OR", keywords="CD,album", keyword_mode="OR", max_price=100,
+            filter_words="broken",
+        ))
+        client = AsyncMock()
+        first = replace(item("A"), title=first_title, price=first_price)
+        second = replace(first, title="CD album", price=second_price)
+        client.search_page.side_effect = [SearchPage([first], None), SearchPage([second], None)]
+        send = AsyncMock()
+        outbox = MailOutbox(db, send=send)
+        result = await scan_monitor(client, db, mon, outbox=outbox)
+        await outbox.drain_due()
+        assert result.found == 1
+        assert db.pending_candidates(mon.id) == 0
+        history = db.list_monitor_products(mon.id)
+        assert len(history) == send.await_count == int(matched)
+        if matched:
+            assert history[0][1:3] == (second.title, second.price)
+            assert [(row.id, row.title, row.price) for row in send.await_args.args[1]] == [
+                (second.id, second.title, second.price),
+            ]
+    finally:
+        db.close()

@@ -74,8 +74,8 @@ async def discover(client: MercariClient, db: Database, monitor: Monitor,
     requested = set()
     found_ids = set()
     candidate_ids = set()
-    discarded_ids = set()
-    skipped_front_ids = set()
+    ignored_ids = set()
+    seen_ids = set()
     front_paths = {query: [] for query in queries}
     front_next = dict.fromkeys(queries)
 
@@ -94,9 +94,6 @@ async def discover(client: MercariClient, db: Database, monitor: Monitor,
         discard = []
         for item in {item.id: item for item in items}.values():
             pending = db.has_candidate(monitor.id, item.id)
-            if (item.id in found_ids and not pending and item.id not in discarded_ids
-                    and not (phase == "first" and item.id in skipped_front_ids)):
-                continue
             decision = db.product_decision(monitor.id, item.id)
             needs_judgment = monitor.needs_judgment(decision)
             eligible = (pending or phase == "first" or (decision is not None and needs_judgment) or
@@ -108,23 +105,17 @@ async def discover(client: MercariClient, db: Database, monitor: Monitor,
                     continue
                 eligible = True
             found_ids.add(item.id)
-            if resume_with_front:
-                if phase == "front" and not eligible:
-                    skipped_front_ids.add(item.id)
-                elif phase == "first":
-                    skipped_front_ids.discard(item.id)
             if not eligible:
                 continue
             if not passes(item, rule):
                 if pending:
                     discard.append(item.id)
-                    discarded_ids.add(item.id)
                 continue
             candidate_ids.add(item.id)
             if db.is_ignored(monitor.id, item.id):
-                result.ignored += 1
+                ignored_ids.add(item.id)
             elif not needs_judgment:
-                result.seen += 1
+                seen_ids.add(item.id)
             elif pending:
                 refresh.append((item.id, item.title, item.price))
             else:
@@ -139,6 +130,8 @@ async def discover(client: MercariClient, db: Database, monitor: Monitor,
         result.queued += inserted
         result.candidates = len(candidate_ids)
         result.found = len(found_ids)
+        result.ignored = len(ignored_ids)
+        result.seen = len(seen_ids)
         return True
 
     async def fetch(query, token, trail, phase, update):
