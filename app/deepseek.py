@@ -113,7 +113,7 @@ class DeepSeekJudge:
             await self._client.budget.acquire()
             try:
                 verdict = await _request_verdict(
-                    self._client.http, self._requirement, detail, state.key, DEFAULT_MODEL,
+                    self._client.http, self._requirement, detail, state.key,
                 )
             except DeepSeekUnavailable as exc:
                 state.failures += 1
@@ -172,39 +172,14 @@ def parse_bool_response(text: str | None) -> bool | None:
     return None
 
 
-async def judge_item(
-    http: httpx.AsyncClient,
-    special_requirement: str,
-    detail: ItemDetail,
-    *,
-    model: str = DEFAULT_MODEL,
-) -> bool | None:
-    """Judge one item. Returns True/False, or None on any failure.
-
-    None (API error, bad status, unparseable reply, missing key) is NEVER
-    treated as a match.
-    """
-    api_key = get_api_key()
-    if not api_key:
-        log.error("DEEPSEEK_API_KEY_FOR_MJM environment variable is not set")
-        return None
-
-    try:
-        return await _request_verdict(http, special_requirement, detail, api_key, model)
-    except DeepSeekUnavailable as exc:
-        log.error("%s", exc)
-        return None
-
-
 async def _request_verdict(
     http: httpx.AsyncClient,
     special_requirement: str,
     detail: ItemDetail,
     api_key: str,
-    model: str,
 ) -> bool | None:
     payload = {
-        "model": model,
+        "model": DEFAULT_MODEL,
         "messages": [
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": build_user_prompt(special_requirement, detail)},

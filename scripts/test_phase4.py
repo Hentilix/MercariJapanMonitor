@@ -18,7 +18,6 @@ data/phase4_test.db to force a fresh AI round.
 import argparse
 import asyncio
 import logging
-import os
 import sys
 from pathlib import Path
 
@@ -27,10 +26,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import httpx  # noqa: E402
 
 from app.database import Database  # noqa: E402
-from app.deepseek import judge_item  # noqa: E402
+from app.deepseek import DeepSeekClient, get_api_key  # noqa: E402
 from app.outbox import MailOutbox  # noqa: E402
 from app.mercari import MercariClient  # noqa: E402
-from app.scanner import scan_monitor  # noqa: E402
+from app.scan_service import load_scan_budgets, scan_monitor_by_id  # noqa: E402
 from app.single_instance import InstanceLock  # noqa: E402
 
 TEST_DB = Path(__file__).resolve().parents[1] / "data" / "phase4_test.db"
@@ -75,7 +74,7 @@ async def main() -> int:
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("httpcore").setLevel(logging.WARNING)
 
-    if not os.environ.get("DEEPSEEK_API_KEY_FOR_MJM"):
+    if not get_api_key():
         print("[ERROR] DEEPSEEK_API_KEY_FOR_MJM is not set.")
         print('Set it first, e.g. PowerShell:  $env:DEEPSEEK_API_KEY_FOR_MJM = "sk-..."')
         return 1
@@ -92,30 +91,27 @@ async def main() -> int:
 
 
 async def run_scan(limit: int) -> int:
+    mercari_budget, deepseek_budget = load_scan_budgets()
     db = Database(TEST_DB)
-    client = MercariClient()
+    client = MercariClient(budget=mercari_budget)
     mon = ensure_monitor(db)
     outbox = MailOutbox(db)
     outbox.recover()
     try:
         async with httpx.AsyncClient(timeout=30.0) as ai_http:
-            async def judge(detail):
-                return await judge_item(ai_http, mon.ai_requirement, detail)
-
-            result = await scan_monitor(
-                client,
-                db,
-                mon,
-                judge=judge,
-                outbox=outbox,
-                ai_limit=limit,
-            )
+            deepseek = DeepSeekClient(ai_http, deepseek_budget)
+            result = await scan_monitor_by_id(db, client, deepseek, outbox, mon.id, ai_limit=limit)
     finally:
         try:
             await outbox.drain_due()
         finally:
             db.close()
             await client.close()
+
+    if result is None or result.summary is None:
+        log.error("Monitor %s did not produce a scan summary", mon.id)
+        return 1
+    log.info("%s", result.summary)
 
     print("\n" + "=" * 40)
     print(f"Found: {result.found}")

@@ -8,10 +8,12 @@ import pytest
 from app.deepseek import (
     DEEPSEEK_URL,
     build_user_prompt,
-    judge_item,
+    DeepSeekClient,
+    DeepSeekUnavailable,
     parse_bool_response,
 )
 from app.mercari import ItemDetail
+from app.request_budget import RequestBudget
 
 
 def run(coro):
@@ -83,6 +85,15 @@ class FakeHttp:
 DETAIL = ItemDetail(title="T", description="D", condition="C", category="K")
 
 
+
+async def judge_once(http):
+    judge = DeepSeekClient(http, RequestBudget(30)).make_judge("req")
+    if judge is None:
+        return None
+    with judge.attempt() as attempt:
+        return await attempt(DETAIL)
+
+
 def make_response(content):
     return FakeResponse(200, {"choices": [{"message": {"content": content}}]})
 
@@ -94,44 +105,46 @@ def api_key(monkeypatch):
 
 def test_judge_returns_true(api_key):
     http = FakeHttp(make_response("true"))
-    assert run(judge_item(http, "req", DETAIL)) is True
+    assert run(judge_once(http)) is True
 
 
 def test_judge_returns_false(api_key):
     http = FakeHttp(make_response("false"))
-    assert run(judge_item(http, "req", DETAIL)) is False
+    assert run(judge_once(http)) is False
 
 
 def test_judge_invalid_reply_is_none(api_key):
     http = FakeHttp(make_response("yes, it matches"))
-    assert run(judge_item(http, "req", DETAIL)) is None
+    assert run(judge_once(http)) is None
 
 
-def test_judge_http_error_is_none(api_key):
+def test_judge_http_error_reports_unavailable(api_key):
     http = FakeHttp(FakeResponse(500, text="server error"))
-    assert run(judge_item(http, "req", DETAIL)) is None
+    with pytest.raises(DeepSeekUnavailable, match="HTTP 500"):
+        run(judge_once(http))
 
 
 def test_judge_bad_body_is_none(api_key):
     http = FakeHttp(FakeResponse(200, {"unexpected": "shape"}))
-    assert run(judge_item(http, "req", DETAIL)) is None
+    assert run(judge_once(http)) is None
 
 
-def test_judge_network_error_is_none(api_key):
+def test_judge_network_error_reports_unavailable(api_key):
     http = FakeHttp(error=httpx.ConnectError("boom"))
-    assert run(judge_item(http, "req", DETAIL)) is None
+    with pytest.raises(DeepSeekUnavailable, match="ConnectError"):
+        run(judge_once(http))
 
 
 def test_judge_missing_api_key_is_none(monkeypatch):
     monkeypatch.delenv("DEEPSEEK_API_KEY_FOR_MJM", raising=False)
     http = FakeHttp(make_response("true"))
-    assert run(judge_item(http, "req", DETAIL)) is None
+    assert run(judge_once(http)) is None
     assert http.calls == []  # no request was even attempted
 
 
 def test_judge_payload_is_minimal_and_correct(api_key):
     http = FakeHttp(make_response("true"))
-    run(judge_item(http, "req", DETAIL))
+    run(judge_once(http))
     url, payload, headers = http.calls[0]
     assert url == DEEPSEEK_URL
     assert headers["Authorization"] == "Bearer test-key"

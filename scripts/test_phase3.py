@@ -14,7 +14,6 @@ Ctrl+C stops it gracefully.
 
 import asyncio
 import logging
-import os
 import sys
 from pathlib import Path
 
@@ -23,10 +22,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import httpx  # noqa: E402
 
 from app.database import Database, Monitor  # noqa: E402
-from app.deepseek import judge_item  # noqa: E402
+from app.deepseek import DeepSeekClient  # noqa: E402
 from app.outbox import MailOutbox  # noqa: E402
 from app.mercari import MercariClient  # noqa: E402
-from app.scanner import scan_monitor  # noqa: E402
+from app.scan_service import load_scan_budgets, make_scan_handler  # noqa: E402
 from app.scheduler import MonitorScheduler  # noqa: E402
 from app.single_instance import InstanceLock  # noqa: E402
 
@@ -67,44 +66,23 @@ def ensure_monitor(db: Database) -> Monitor:
     return mon
 
 
-def make_judge(ai_client: httpx.AsyncClient, requirement: str):
-    """Build the AI judge, or None when no API key is configured."""
-    if not requirement or not os.environ.get("DEEPSEEK_API_KEY_FOR_MJM"):
-        if requirement:
-            log.warning("DEEPSEEK_API_KEY_FOR_MJM is not set — AI filtering skipped")
-        return None
-
-    async def judge(detail):
-        return await judge_item(ai_client, requirement, detail)
-
-    return judge
-
-
-async def scan_by_id(
-    monitor_id: int, db: Database, client: MercariClient, ai_client: httpx.AsyncClient,
-    outbox: MailOutbox,
-) -> None:
-    mon = db.get_monitor(monitor_id)
-    if mon is None:
-        return
-    judge = make_judge(ai_client, mon.ai_requirement)
-    try:
-        await scan_monitor(client, db, mon, judge=judge, outbox=outbox)
-    except Exception:
-        log.exception("Monitor %s (%s) 扫描失败", mon.id, mon.name)
-
-
 async def run_single() -> int:
     """--once mode: one scan, then exit."""
+    mercari_budget, deepseek_budget = load_scan_budgets()
     db = Database(TEST_DB)
-    client = MercariClient()
+    client = MercariClient(budget=mercari_budget)
     outbox = MailOutbox(db)
     outbox.recover()
     try:
         async with httpx.AsyncClient(timeout=30.0) as ai_client:
             mon = ensure_monitor(db)
-            await scan_by_id(mon.id, db, client, ai_client, outbox)
+            scan = make_scan_handler(db, client, DeepSeekClient(ai_client, deepseek_budget), outbox)
+            summary = await scan(mon.id)
             await outbox.drain_due()
+            if summary is None:
+                log.error("Monitor %s did not produce a scan summary", mon.id)
+                return 1
+            log.info("%s", summary)
             return 0
     finally:
         db.close()
@@ -113,14 +91,14 @@ async def run_single() -> int:
 
 async def run_monitor() -> int:
     """Long-running mode: scheduler + immediate scan + periodic scans."""
+    mercari_budget, deepseek_budget = load_scan_budgets()
     db = Database(TEST_DB)
-    client = MercariClient()
+    client = MercariClient(budget=mercari_budget)
     ai_client = httpx.AsyncClient(timeout=30.0)
     outbox = MailOutbox(db)
     ensure_monitor(db)
-    scheduler = MonitorScheduler(
-        lambda monitor_id: scan_by_id(monitor_id, db, client, ai_client, outbox)
-    )
+    deepseek = DeepSeekClient(ai_client, deepseek_budget)
+    scheduler = MonitorScheduler(make_scan_handler(db, client, deepseek, outbox))
     outbox.start()
     scheduler.start(db.list_monitors())
     log.info(
@@ -152,7 +130,11 @@ def main() -> int:
     try:
         if "--once" in sys.argv:
             log.info("Single-scan mode (--once)")
-            return asyncio.run(run_single())
+            try:
+                return asyncio.run(run_single())
+            except Exception:
+                log.exception("Single scan failed")
+                return 1
         log.info("Starting MercariJapanMonitor phase3 test (Ctrl+C to stop)")
         return asyncio.run(run_monitor())
     finally:

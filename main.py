@@ -13,7 +13,6 @@ import logging
 import logging.handlers
 import os
 import sys
-from collections.abc import Awaitable, Callable
 from pathlib import Path
 
 import httpx
@@ -23,8 +22,7 @@ from app.database import Database
 from app.deepseek import DeepSeekClient
 from app.mercari import MercariClient
 from app.outbox import MailOutbox
-from app.request_budget import RequestBudget
-from app.scanner import scan_monitor as run_monitor_scan
+from app.scan_service import load_scan_budgets, make_scan_handler
 from app.scheduler import MonitorScheduler
 from app.single_instance import InstanceLock
 from app.ui import register_pages
@@ -74,31 +72,10 @@ def setup_logging() -> None:
     logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 
-def make_scan_handler(
-    db: Database, client: MercariClient, deepseek: DeepSeekClient, mail_outbox: MailOutbox,
-) -> Callable[[int], Awaitable[str | None]]:
-    async def scan_monitor(monitor_id: int) -> str | None:
-        """One full scan for one monitor (Phase 5.3-A monitor-centric scanner)."""
-        mon = db.get_monitor(monitor_id)
-        if mon is None:
-            return None
-
-        result = await run_monitor_scan(
-            client,
-            db,
-            mon,
-            judge=deepseek.make_judge(mon.ai_requirement),
-            outbox=mail_outbox,
-        )
-        return result.summary
-    return scan_monitor
-
-
 def main() -> int:
     setup_logging()
     try:
-        mercari_budget = RequestBudget.from_env("MJM_MERCARI_REQUESTS_PER_MINUTE", 60)
-        deepseek_budget = RequestBudget.from_env("MJM_DEEPSEEK_REQUESTS_PER_MINUTE", 30)
+        mercari_budget, deepseek_budget = load_scan_budgets()
     except ValueError as exc:
         log.error("%s", exc)
         return 1
