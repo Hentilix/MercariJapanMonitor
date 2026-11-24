@@ -59,10 +59,10 @@ async def test_rediscovered_candidate_is_filtered_again(changes, max_price, disc
             assert db.wants_recheck(monitor.id, "A")
             client.search_page.return_value = SearchPage([original], None)
             result = await scan_monitor(client, db, monitor, judge=judge)
-            assert result.new == result.ai_matched == 1
+            assert result.new == result.matched == 1
             assert not db.wants_recheck(monitor.id, "A")
         else:
-            assert result.ai_matched == 1
+            assert result.matched == 1
             assert db.list_monitor_products(monitor.id)[0][2] is None
     finally:
         db.close()
@@ -95,7 +95,7 @@ async def test_later_or_page_refreshes_title_and_invalidates_cached_detail(monke
         judge.return_value = True
         result = await scan_monitor(client, db, monitor, judge=judge)
         assert result.new == 0
-        assert result.ai_matched == 1
+        assert result.matched == 1
         assert judge.await_args.args[0].title == edited.title
         assert db.list_monitor_products(monitor.id)[0][1:3] == (edited.title, 200)
     finally:
@@ -143,7 +143,7 @@ def test_first_scan_budget(tmp_path, total, expected):
     monitor = db.get_monitor(db.create_monitor(name="CD", keywords="CD"))
     pages = Pages(total)
     result = asyncio.run(scan_monitor(pages, db, monitor))
-    assert len(pages.calls) == result.ai_matched == expected
+    assert len(pages.calls) == result.matched == expected
     db.close()
 
 
@@ -153,14 +153,14 @@ def test_restart_resumes_first_scan(tmp_path):
     monitor = db.get_monitor(db.create_monitor(name="CD", keywords="CD"))
     first = Pages(4, fail_at=3)
     result = asyncio.run(scan_monitor(first, db, monitor))
-    assert result.ai_matched == 2
+    assert result.matched == 2
     db.close()
 
     db = Database(path)
     second = Pages(4)
     result = asyncio.run(scan_monitor(second, db, monitor))
     assert second.calls == [("CD", 1), ("CD", 3), ("CD", 4)]
-    assert result.ai_matched == 2
+    assert result.matched == 2
     assert db.count_monitor_products(monitor.id) == 4
     assert db.begin_search(monitor, {})[1]["initial_done"]
     db.close()
@@ -185,7 +185,7 @@ def test_single_query_checks_homepage_while_first_scan_page_keeps_failing(keywor
             pages = Listings(3, fail_at=2)
             result = asyncio.run(scan_monitor(pages, db, monitor))
             assert pages.calls == [(query, 1), (query, 2)]
-            assert result.ai_matched == 1
+            assert result.matched == 1
             assert db.has_monitor_product(monitor.id, f"item-{now}")
             state = db.begin_search(monitor, {})[1]
             assert state["since"] == 1000
@@ -501,7 +501,7 @@ def test_candidate_retry_backoff_and_detail_survive_restart(tmp_path, monkeypatc
             assert db.pending_candidates(monitor.id) == 1
             now += 1
         verdict = True
-        assert scan().ai_matched == 1
+        assert scan().matched == 1
         assert db.pending_candidates(monitor.id) == 0
         assert detail_requests == ["CD-1"]
     finally:
@@ -526,7 +526,7 @@ def test_failed_candidate_insert_rolls_back_page_progress(tmp_path):
     pages = Pages(3)
     result = asyncio.run(scan_monitor(pages, db, monitor))
     assert pages.calls == [("CD", 1), ("CD", 2), ("CD", 3)]
-    assert result.ai_matched == 3
+    assert result.matched == 3
     db.close()
 
 

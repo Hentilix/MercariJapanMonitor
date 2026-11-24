@@ -14,55 +14,50 @@ from app.ui.settings import config_status_text, deepseek_status_text, smtp_statu
 # ------------------------------------------------------------------ 测试 1/3/4/5/6
 def test_valid_form_passes():
     assert (
-        validate_monitor_form("A", "Built to Spill，CD", None, 5000, "AND", "只要 CD")
+        validate_monitor_form("A", "Built to Spill，CD", None, 5000, "AND")
         is None
     )
     assert (
-        validate_monitor_form("A", "Built to Spill, CD", 100, 5000, "OR", "req")
+        validate_monitor_form("A", "Built to Spill, CD", 100, 5000, "OR")
         is None
     )
 
 
 def test_empty_name_blocked():
-    error = validate_monitor_form("  ", "kw", None, None, "AND", "req")
+    error = validate_monitor_form("  ", "kw", None, None, "AND")
     assert error is not None and "名称" in error
 
 
 @pytest.mark.parametrize("keywords", ["", "  ", ",", "，，", " , ， , "])
 def test_empty_keywords_blocked(keywords):
-    error = validate_monitor_form("A", keywords, None, None, "AND", "req")
+    error = validate_monitor_form("A", keywords, None, None, "AND")
     assert error == "请至少填写一个搜索关键词。"
 
 
 @pytest.mark.parametrize("keywords", ["，CD,,", "Built to Spill"])
 def test_nonempty_keyword_list_passes(keywords):
-    assert validate_monitor_form("A", keywords, None, None, "AND", "req") is None
-
-
-def test_empty_ai_requirement_blocked():
-    error = validate_monitor_form("A", "kw", None, None, "AND", "   ")
-    assert error is not None and "AI" in error
+    assert validate_monitor_form("A", keywords, None, None, "AND") is None
 
 
 def test_invalid_mode_blocked():
-    error = validate_monitor_form("A", "kw", None, None, "XOR", "req")
+    error = validate_monitor_form("A", "kw", None, None, "XOR")
     assert error is not None and "AND" in error
 
 
 @pytest.mark.parametrize("bad_price", ["abc", "1.5", "1000.5", "-100", -100, 1.5])
 def test_invalid_prices_blocked(bad_price):
-    error = validate_monitor_form("A", "kw", bad_price, None, "AND", "req")
+    error = validate_monitor_form("A", "kw", bad_price, None, "AND")
     assert error is not None and ("整数" in error or "负数" in error)
 
 
 def test_min_greater_than_max_blocked():
-    error = validate_monitor_form("A", "kw", 5000, 1000, "AND", "req")
+    error = validate_monitor_form("A", "kw", 5000, 1000, "AND")
     assert error is not None and "不能高于" in error
 
 
 def test_min_equal_max_allowed():
     assert (
-        validate_monitor_form("A", "kw", 1000, 1000, "AND", "req") is None
+        validate_monitor_form("A", "kw", 1000, 1000, "AND") is None
     )
 
 

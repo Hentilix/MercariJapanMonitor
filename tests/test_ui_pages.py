@@ -117,10 +117,10 @@ async def test_monitor_form_requires_a_keyword_before_saving(page_session, editi
         tab_a.find("新建任务").click()
         form_name(tab_a).value = "alpha"
         for field in open_dialog(tab_a).descendants():
-            if isinstance(field, ui.textarea):
-                field.value = "CD"
             if isinstance(field, ui.switch):
                 field.value = False
+    requirement = next(field for field in open_dialog(tab_a).descendants() if isinstance(field, ui.textarea))
+    requirement.value = "   "
     keywords = next(
         field for field in open_dialog(tab_a).descendants()
         if isinstance(field, ui.input) and field.props.get("label", "").startswith("搜索关键词")
@@ -139,8 +139,10 @@ async def test_monitor_form_requires_a_keyword_before_saving(page_session, editi
     click_dialog(tab_a, "保存")
     saved, = db.list_monitors()
     assert saved.keywords == "，CD,,"
+    assert saved.ai_requirement == ""
     if editing:
         assert saved.id == before[0].id
+        assert saved.rule_version == before[0].rule_version + 1
     scheduler.schedule.assert_called_once_with(saved)
 
 

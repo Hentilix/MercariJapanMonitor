@@ -122,8 +122,8 @@ async def run_scan(limit: int) -> int:
     print(f"Level 1 candidates: {result.candidates}")
     print(f"New: {result.new}")
     print(f"Ignored: {result.ignored}")
-    print(f"AI matched: {result.ai_matched}")
-    print(f"AI rejected: {result.ai_rejected}")
+    print(f"AI matched: {result.matched}")
+    print(f"AI rejected: {result.rejected}")
     print(f"AI errors: {result.ai_errors}")
     print("=" * 40)
     return 0

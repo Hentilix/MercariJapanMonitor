@@ -55,7 +55,6 @@ def validate_monitor_form(
     min_price,
     max_price,
     keyword_mode: str,
-    ai_requirement: str,
 ) -> str | None:
     """Return a user-facing error message, or None when the form is valid."""
     if not (name or "").strip():
@@ -64,8 +63,6 @@ def validate_monitor_form(
         return "请至少填写一个搜索关键词。"
     if keyword_mode not in ("AND", "OR"):
         return "匹配模式必须是 AND 或 OR。"
-    if not (ai_requirement or "").strip():
-        return "AI 要求不能为空。"
     try:
         min_p = parse_price(min_price)
         max_p = parse_price(max_price)
@@ -303,7 +300,6 @@ class MonitorsView:
             self.min_input.value,
             self.max_input.value,
             self.mode_select.value or "",
-            self.requirement_input.value or "",
         )
         if error:
             ui.notify(f"保存失败：{error}", type="negative")
@@ -374,7 +370,7 @@ class MonitorsView:
                 placeholder="LP，DVD，Blu-ray",
             ).props("dense")
             self.requirement_input = ui.textarea(
-                "AI 语义要求（必填，交给 DeepSeek 判断，不限长度）",
+                "AI 语义要求（可选，留空时只使用本地规则）",
                 placeholder="只保留 CD 格式的正式发行，不要黑胶、DVD、盗版或数字版本。",
             ).props("dense")
             self.interval_select = ui.select(

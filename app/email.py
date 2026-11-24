@@ -97,7 +97,7 @@ def build_batch_body(label: str, items: list[SearchItem]) -> str:
         lines.append("")
     lines.append(SEPARATOR)
     lines.append("")
-    lines.append("以上商品已通过你的筛选条件和 DeepSeek 语义判断。")
+    lines.append("以上商品符合此任务的筛选条件。")
     return "\n".join(lines)
 
 

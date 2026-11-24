@@ -34,8 +34,8 @@ class ScanResult:
     already_seen: int = 0
     ignored: int = 0
     details_fetched: int = 0
-    ai_matched: int = 0
-    ai_rejected: int = 0
+    matched: int = 0
+    rejected: int = 0
     ai_errors: int = 0
     summary: str | None = None
 
@@ -128,10 +128,10 @@ async def scan_monitor(
         if not inserted:
             return
         if matched:
-            result.ai_matched += 1
+            result.matched += 1
             log.info("MATCH: %s | %s | %s", item.id, item.title, _fmt_price(item.price))
         else:
-            result.ai_rejected += 1
+            result.rejected += 1
 
     try:
         for item in pending:
@@ -199,8 +199,8 @@ async def scan_monitor(
     summary = (
         f"found={result.found}, candidates={result.candidates}, "
         f"new={result.new}, already_seen={result.already_seen}, "
-        f"matched={result.ai_matched}, "
-        f"rejected={result.ai_rejected}, ignored={result.ignored}, "
+        f"matched={result.matched}, "
+        f"rejected={result.rejected}, ignored={result.ignored}, "
         f"errors={result.ai_errors}"
     )
     if result.found > 0 and result.candidates == 0:

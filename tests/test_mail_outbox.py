@@ -56,7 +56,7 @@ async def test_rediscovered_price_reaches_history_and_mail(tmp_path, configured,
         db = Database(path)
         now = 1300
         judge.return_value = True
-        assert (await scan()).ai_matched == 1
+        assert (await scan()).matched == 1
         assert db.list_monitor_products(mon.id)[0][2] == 200
         await scan()
         send.assert_awaited_once()
@@ -338,7 +338,7 @@ async def test_rejected_candidate_does_not_queue_mail(configured):
     try:
         result = await scan_monitor(client, db, mon, judge=AsyncMock(return_value=False), outbox=outbox)
         await outbox.drain_due()
-        assert result.ai_rejected == 1
+        assert result.rejected == 1
         assert db.mail_status(mon.id).pending == 0
         send.assert_not_awaited()
     finally:

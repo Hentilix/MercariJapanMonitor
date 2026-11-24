@@ -29,7 +29,8 @@ def edit(db, mid, **changes):
     db.update_monitor(mid, **(fields | changes))
 
 
-def test_old_rejection_can_become_first_match(tmp_path):
+@pytest.mark.parametrize("new_requirement", ["new", ""])
+def test_old_rejection_can_become_first_match(tmp_path, new_requirement):
     db = Database(tmp_path / "scan.db")
     mid = db.create_monitor(name="CD", keywords="CD", ai_requirement="old")
     listings = Listings()
@@ -41,22 +42,23 @@ def test_old_rejection_can_become_first_match(tmp_path):
         return matched
 
     def scan():
+        monitor = db.get_monitor(mid)
         return asyncio.run(scan_monitor(
-            listings, db, db.get_monitor(mid), judge=judge,
+            listings, db, monitor, judge=judge if monitor.ai_requirement else None,
         ))
 
-    assert scan().ai_rejected == 1
+    assert scan().rejected == 1
     edit(db, mid, notification_email="new@example.test")
-    assert scan().ai_rejected == 0
-    edit(db, mid, ai_requirement="new")
+    assert scan().rejected == 0
+    edit(db, mid, ai_requirement=new_requirement)
     listings.items = []
-    assert scan().ai_matched == 0
+    assert scan().matched == 0
     listings.items = [listings.item]
     matched = True
-    assert scan().ai_matched == 1
+    assert scan().matched == 1
     edit(db, mid, ai_requirement="another")
-    assert scan().ai_matched == 0
-    assert calls == ["CD", "CD"]
+    assert scan().matched == 0
+    assert calls == (["CD", "CD"] if new_requirement else ["CD"])
     assert db.count_monitor_products(mid, matched=0) == 0
     db.close()
 
@@ -73,7 +75,7 @@ def test_edit_then_revert_during_judgment_discards_old_result(tmp_path):
     result = asyncio.run(scan_monitor(
         Listings(), db, db.get_monitor(mid), judge=judge,
     ))
-    assert result.ai_matched == 0
+    assert result.matched == 0
     assert db.count_monitor_products(mid, matched=None) == 0
     assert db.get_monitor(mid).last_scan_at is None
     assert db.pending_candidates(mid) == 1
@@ -98,7 +100,7 @@ async def test_promotion_and_mail_commit_together(tmp_path, monkeypatch):
             listings, db, db.get_monitor(mid), judge=judge, outbox=outbox,
         )
 
-    assert (await scan()).ai_rejected == 1
+    assert (await scan()).rejected == 1
     edit(db, mid, ai_requirement="new")
     listings.items = [replace(listings.item, title="CD edited", price=120)]
     matched = True
@@ -113,11 +115,11 @@ async def test_promotion_and_mail_commit_together(tmp_path, monkeypatch):
     assert db.mail_status(mid).pending == 0
 
     db._conn.execute("DROP TRIGGER fail_mail")
-    assert (await scan()).ai_matched == 1
+    assert (await scan()).matched == 1
     assert db.product_decision(mid, "m1") == (1, 2)
     assert db.pending_candidates(mid) == 0
     edit(db, mid, ai_requirement="newer")
-    assert (await scan()).ai_matched == 0
+    assert (await scan()).matched == 0
     assert db.mail_status(mid).pending == 1
     _, _, items = db.next_due_mail(float("inf"))
     assert items == [("m1", "CD edited", 120, listings.item.url)]
@@ -153,7 +155,7 @@ async def test_legacy_rejections_retry_after_migration_and_restart(tmp_path):
 
     monitor = db.get_monitor(mid)
     result = await scan_monitor(listings, db, monitor, judge=reject)
-    assert (result.ai_rejected, result.ignored) == (1, 1)
+    assert (result.rejected, result.ignored) == (1, 1)
     assert db.product_decision(mid, "m1") == (0, 1)
     assert db.list_monitor_products(mid, include_decision=True)[0][-2:] == (1, None)
     db.close()
@@ -195,7 +197,7 @@ async def test_deep_recheck_with_unknown_date_keeps_rejection_until_retry(tmp_pa
     verdict = False
     now += 300
     result = await scan_monitor(DeepListings(), db, monitor, judge=judge)
-    assert result.ai_rejected == 1
+    assert result.rejected == 1
     assert db.product_decision(mid, "m1") == (0, 2)
     assert db.pending_candidates(mid) == 0
     db.close()

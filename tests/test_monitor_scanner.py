@@ -136,7 +136,7 @@ def test_ignored_item_is_skipped_only_for_that_monitor(tmp_path):
     result_b = run(
         scan_monitor(client, db, mon_b, judge=fake_judge([True], calls_b))
     )
-    assert result_b.ai_matched == 1      # B processed it normally
+    assert result_b.matched == 1      # B processed it normally
     assert len(calls_b) == 1
     db.close()
 
@@ -152,7 +152,7 @@ def test_processed_item_is_not_reprocessed(tmp_path):
     first = run(
         scan_monitor(client, db, mon, judge=fake_judge([True], calls))
     )
-    assert first.ai_matched == 1
+    assert first.matched == 1
     second = run(
         scan_monitor(client, db, mon, judge=fake_judge([True, True], calls))
     )
@@ -173,7 +173,7 @@ def test_deepseek_false_is_processed_without_history(tmp_path):
     first = run(
         scan_monitor(client, db, mon, judge=fake_judge([False], calls))
     )
-    assert first.ai_rejected == 1
+    assert first.rejected == 1
     assert db.list_monitor_products(mon.id) == []   # NOT in history
     assert db.has_monitor_product(mon.id, "X")      # but processed
 
@@ -206,7 +206,7 @@ def test_deepseek_error_is_retried_next_scan(tmp_path, monkeypatch):
         scan_monitor(client, db, mon, judge=fake_judge([True], calls2))
     )
     assert second.new == 0  # the existing candidate was retried
-    assert second.ai_matched == 1        # and it succeeded this time
+    assert second.matched == 1        # and it succeeded this time
     assert db.has_monitor_product(mon.id, "X")
     db.close()
 
@@ -236,7 +236,7 @@ def test_full_item_error_is_retried_next_scan(tmp_path, monkeypatch):
     second = run(
         scan_monitor(client2, db, mon, judge=fake_judge([True], calls2))
     )
-    assert second.ai_matched == 1
+    assert second.matched == 1
     assert db.has_monitor_product(mon.id, "X")
     db.close()
 
@@ -404,7 +404,7 @@ def test_no_ai_gate_records_all_candidates(tmp_path):
         ]
     )
     result = run(scan_monitor(client, db, mon))
-    assert result.ai_matched == 2
+    assert result.matched == 2
     assert len(db.list_monitor_products(mon.id)) == 2
     db.close()
 
@@ -432,7 +432,7 @@ def test_judge_crash_is_not_processed(tmp_path, monkeypatch):
         scan_monitor(client, db, mon, judge=fake_judge([True], calls))
     )
     assert second.new == 0  # the existing candidate was retried
-    assert second.ai_matched == 1
+    assert second.matched == 1
     assert db.has_monitor_product(mon.id, "X")
     db.close()
 
@@ -453,7 +453,7 @@ def test_ai_limit_leaves_rest_unprocessed(tmp_path):
             ai_limit=2,
         )
     )
-    assert result.ai_matched == 2
+    assert result.matched == 2
     assert db.has_monitor_product(mon.id, "0")
     assert db.has_monitor_product(mon.id, "1")
     assert not db.has_monitor_product(mon.id, "2")  # beyond the limit
@@ -534,8 +534,8 @@ def test_judge_none_with_ai_requirement_matches_nothing(tmp_path):
     result = run(
         scan_monitor(client, db, mon, judge=None)
     )
-    assert result.ai_matched == 0
-    assert result.ai_rejected == 0
+    assert result.matched == 0
+    assert result.rejected == 0
     assert result.ai_errors == 0
     assert "缺少 DeepSeek API Key" in result.summary
     assert client.detail_calls == []
@@ -551,7 +551,7 @@ def test_judge_none_with_ai_requirement_matches_nothing(tmp_path):
     calls = []
     second = run(scan_monitor(client2, db, mon, judge=fake_judge([True, True], calls)))
     assert second.new == 0
-    assert second.ai_matched == 2
+    assert second.matched == 2
     assert db.pending_candidates(mon.id) == 0
     assert db.has_monitor_product(mon.id, "1")
     db.close()
@@ -645,7 +645,7 @@ def test_zero_candidates_summary_explains_level1_filtering(tmp_path):
     assert result.new == 0
     assert result.already_seen == 0
     assert result.ignored == 0
-    assert result.ai_matched == 0
+    assert result.matched == 0
     assert len(db.list_monitor_products(mon.id)) == 0  # nothing recorded
 
     last = db.get_monitor(mon.id).last_result
@@ -712,6 +712,6 @@ def test_or_mode_dedupes_items_seen_in_multiple_keyword_searches(tmp_path):
     assert client.queries == ["Kanye West", "College Dropout"]
     assert result.found == 1
     assert result.candidates == 1
-    assert result.ai_matched == 1
+    assert result.matched == 1
     assert len(db.list_monitor_products(mon.id)) == 1
     db.close()
