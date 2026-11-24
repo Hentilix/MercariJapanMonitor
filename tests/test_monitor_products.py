@@ -1,5 +1,9 @@
 """Offline tests for Phase 5.2: monitor_products and ignored_products."""
 
+import sqlite3
+
+import pytest
+
 from app.database import Database
 
 
@@ -371,3 +375,34 @@ def test_unignore_missing_record_is_noop(tmp_path):
     db.unignore_product(a_id, "never-ignored")  # must not crash
     assert db.count_ignored_products(a_id) == 0
     db.close()
+
+
+@pytest.mark.parametrize(("operation", "target"), [
+    ("ignore_product", "ignored_products"),
+    ("delete_monitor_product", "scan_rechecks"),
+    ("unignore_product", "scan_rechecks"),
+])
+def test_product_action_rolls_back_on_write_failure(tmp_path, operation, target):
+    db, (mid, _) = make_db(tmp_path)
+    item_id = "m1"
+    ignored = operation == "unignore_product"
+    if ignored:
+        db.ignore_product(mid, item_id)
+    else:
+        db.add_monitor_product(mid, mercari_id=item_id, title="CD", price=100, url="url")
+    db._conn.execute(
+        f"CREATE TRIGGER fail_action BEFORE INSERT ON {target} "
+        "BEGIN SELECT RAISE(ABORT, 'injected failure'); END"
+    )
+    with pytest.raises(sqlite3.IntegrityError, match="injected failure"):
+        getattr(db, operation)(mid, item_id)
+    db.set_monitor_enabled(mid, False)
+    db.close()
+
+    db = Database(tmp_path / "test.db")
+    try:
+        assert db.is_ignored(mid, item_id) == ignored
+        assert db.has_monitor_product(mid, item_id) == (not ignored)
+        assert not db.wants_recheck(mid, item_id)
+    finally:
+        db.close()

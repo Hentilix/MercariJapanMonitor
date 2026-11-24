@@ -646,13 +646,13 @@ class Database:
 
         This is NOT "ignore": the item may be re-processed on a later scan.
         """
-        deleted = self._conn.execute(
-            "DELETE FROM monitor_products WHERE monitor_id=? AND mercari_id=?",
-            (monitor_id, mercari_id),
-        ).rowcount
-        if deleted:
-            self._mark_recheck(monitor_id, mercari_id)
-        self._conn.commit()
+        with self._conn:
+            deleted = self._conn.execute(
+                "DELETE FROM monitor_products WHERE monitor_id=? AND mercari_id=?",
+                (monitor_id, mercari_id),
+            ).rowcount
+            if deleted:
+                self._mark_recheck(monitor_id, mercari_id)
 
     # ------------------------------------------ ignored products (5.2)
     def is_ignored(self, monitor_id: int, mercari_id: str) -> bool:
@@ -673,26 +673,26 @@ class Database:
         any Mercari requests. Ignoring an item that is not in the history
         still records the ignored entry (fields become NULL/unknown).
         """
-        row = self._conn.execute(
-            "SELECT title, price, url FROM monitor_products "
-            "WHERE monitor_id=? AND mercari_id=?",
-            (monitor_id, mercari_id),
-        ).fetchone()
-        title, price, url = row if row else (None, None, None)
-        self._remove_candidate(monitor_id, mercari_id)
-        self._conn.execute(
-            "DELETE FROM monitor_products WHERE monitor_id=? AND mercari_id=?",
-            (monitor_id, mercari_id),
-        )
-        self._conn.execute(
-            """
-            INSERT OR IGNORE INTO ignored_products
-                (monitor_id, mercari_id, title, price, url, ignored_at)
-            VALUES (?, ?, ?, ?, ?, ?)
-            """,
-            (monitor_id, mercari_id, title, price, url, at or _now_iso()),
-        )
-        self._conn.commit()
+        with self._conn:
+            row = self._conn.execute(
+                "SELECT title, price, url FROM monitor_products "
+                "WHERE monitor_id=? AND mercari_id=?",
+                (monitor_id, mercari_id),
+            ).fetchone()
+            title, price, url = row if row else (None, None, None)
+            self._remove_candidate(monitor_id, mercari_id)
+            self._conn.execute(
+                "DELETE FROM monitor_products WHERE monitor_id=? AND mercari_id=?",
+                (monitor_id, mercari_id),
+            )
+            self._conn.execute(
+                """
+                INSERT OR IGNORE INTO ignored_products
+                    (monitor_id, mercari_id, title, price, url, ignored_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (monitor_id, mercari_id, title, price, url, at or _now_iso()),
+            )
 
     def unignore_product(self, monitor_id: int, mercari_id: str) -> None:
         """Only removes the ignored entry — does NOT re-add to the history.
@@ -700,13 +700,13 @@ class Database:
         The item becomes eligible for processing again on the next scan.
         Missing records are a no-op.
         """
-        deleted = self._conn.execute(
-            "DELETE FROM ignored_products WHERE monitor_id=? AND mercari_id=?",
-            (monitor_id, mercari_id),
-        ).rowcount
-        if deleted:
-            self._mark_recheck(monitor_id, mercari_id)
-        self._conn.commit()
+        with self._conn:
+            deleted = self._conn.execute(
+                "DELETE FROM ignored_products WHERE monitor_id=? AND mercari_id=?",
+                (monitor_id, mercari_id),
+            ).rowcount
+            if deleted:
+                self._mark_recheck(monitor_id, mercari_id)
 
     def list_ignored_products(
         self, monitor_id: int, *, limit: int = 20, offset: int = 0
