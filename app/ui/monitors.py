@@ -1,4 +1,3 @@
-import asyncio
 import logging
 import sqlite3
 from collections.abc import Callable
@@ -196,7 +195,7 @@ class MonitorsView:
     def _apply_schedule(self, monitor: Monitor) -> None:
         self.scheduler.schedule(monitor)
         if monitor.enabled:
-            asyncio.create_task(self.scheduler.run_monitor_now(monitor.id))
+            self.scheduler.request_scan(monitor.id)
 
     def toggle_enabled(self, monitor_id: int, enabled: bool) -> None:
         self.db.set_monitor_enabled(monitor_id, enabled)
@@ -231,6 +230,8 @@ class MonitorsView:
         with client:
             if outcome.status is ScanStatus.ALREADY_RUNNING:
                 ui.notify("该任务正在扫描中，请稍候。", type="warning")
+            elif outcome.status is ScanStatus.STOPPING:
+                ui.notify("程序正在停止，无法开始扫描。", type="warning")
             elif outcome.status is ScanStatus.FAILED:
                 ui.notify("扫描失败，请查看日志。", type="negative")
             elif outcome.status is ScanStatus.INVALIDATED:

@@ -24,6 +24,7 @@ class ScanStatus(Enum):
     FAILED = "failed"
     ALREADY_RUNNING = "already_running"
     INVALIDATED = "invalidated"
+    STOPPING = "stopping"
 
 
 @dataclass(frozen=True)
@@ -51,17 +52,36 @@ class MonitorScheduler:
 
     def __init__(self, scan_func: Callable[[int], Awaitable[str | None]]) -> None:
         self._scan_func = scan_func
-        self._tasks: dict[int, asyncio.Task] = {}
+        self._tasks: dict[int, asyncio.Task[ScanOutcome]] = {}
+        self._stopping = False
         self._scheduler = AsyncIOScheduler()
 
     def job_id(self, monitor_id: int) -> str:
         return f"monitor-{monitor_id}"
 
+    def request_scan(self, monitor_id: int) -> asyncio.Task[ScanOutcome] | None:
+        """Register an accepted scan before yielding to the event loop."""
+        if self._stopping or self.is_running(monitor_id):
+            return None
+        task = asyncio.create_task(self._scan(monitor_id))
+        self._tasks[monitor_id] = task
+        task.add_done_callback(lambda completed: self._forget_scan(monitor_id, completed))
+        return task
+
+    def _forget_scan(self, monitor_id: int, task: asyncio.Task[ScanOutcome]) -> None:
+        if self._tasks.get(monitor_id) is task:
+            del self._tasks[monitor_id]
+
     async def run_monitor_now(self, monitor_id: int) -> ScanOutcome:
-        if self.is_running(monitor_id):
+        if self._stopping:
+            return ScanOutcome(ScanStatus.STOPPING)
+        task = self.request_scan(monitor_id)
+        if task is None:
             log.info("Monitor %s 本次扫描跳过：上一次扫描尚未结束", monitor_id)
             return ScanOutcome(ScanStatus.ALREADY_RUNNING)
-        self._tasks[monitor_id] = asyncio.current_task()
+        return await asyncio.shield(task)
+
+    async def _scan(self, monitor_id: int) -> ScanOutcome:
         log.info("Monitor %s 开始扫描", monitor_id)
         try:
             summary = await self._scan_func(monitor_id)
@@ -73,11 +93,10 @@ class MonitorScheduler:
         except Exception as exc:
             log.exception("Monitor %s 扫描失败: %s", monitor_id, exc)
             return ScanOutcome(ScanStatus.FAILED)
-        finally:
-            self._tasks.pop(monitor_id, None)
 
     def is_running(self, monitor_id: int) -> bool:
-        return monitor_id in self._tasks
+        task = self._tasks.get(monitor_id)
+        return task is not None and not task.done()
 
     def schedule(self, monitor: Monitor) -> None:
         """Create, reschedule, or remove the monitor's job from its config."""
@@ -160,6 +179,7 @@ class MonitorScheduler:
         if monitors is not None:
             self.reload_monitors(monitors)
         self._scheduler.start()
+        self._stopping = False
         if monitors is not None:
             for monitor in monitors:
                 if monitor.enabled:
@@ -169,7 +189,7 @@ class MonitorScheduler:
                         monitor.name,
                         monitor.interval_minutes,
                     )
-                    asyncio.create_task(self.run_monitor_now(monitor.id))
+                    self.request_scan(monitor.id)
 
     async def stop(self) -> None:
         """Pause, wait for in-flight scans, then shut down.
@@ -177,6 +197,7 @@ class MonitorScheduler:
         Safe to call even if the scheduler was never started (APScheduler's
         pause()/shutdown() raise SchedulerNotRunningError in that state).
         """
+        self._stopping = True
         if self._scheduler.running:
             self._scheduler.pause()
         tasks = list(self._tasks.values())

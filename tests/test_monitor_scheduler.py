@@ -10,7 +10,7 @@ from datetime import timedelta
 import pytest
 
 from app.database import Database
-from app.scheduler import MonitorScheduler
+from app.scheduler import MonitorScheduler, ScanStatus
 
 
 def make_monitor_fields(name, interval_minutes=30, enabled=True):
@@ -358,5 +358,26 @@ async def test_stop_waits_for_inflight_scan(tmp_path):
         assert finished.is_set()
     finally:
         release.set()
+        await scheduler.stop()
+        db.close()
+
+
+@pytest.mark.asyncio
+async def test_immediate_stop_waits_for_scan_accepted_at_startup(tmp_path):
+    db, (monitor,) = make_db(tmp_path, make_monitor_fields("A"))
+    scanned = []
+
+    async def scan(monitor_id):
+        scanned.append(monitor_id)
+        return "completed"
+
+    scheduler = MonitorScheduler(scan)
+    try:
+        scheduler.start([monitor])
+        await scheduler.stop()
+        assert scanned == [monitor.id]
+        assert (await scheduler.run_monitor_now(monitor.id)).status is ScanStatus.STOPPING
+        assert scanned == [monitor.id]
+    finally:
         await scheduler.stop()
         db.close()

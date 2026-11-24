@@ -263,21 +263,24 @@ async def test_manual_scan_displays_failure_then_current_result(page_session):
         db.set_last_scan(target, "new summary")
         return "new summary"
 
+    async def wait_for_notification(message):
+        async with asyncio.timeout(2):
+            while not tab_a.notify.contains(message):
+                await asyncio.sleep(0.01)
+
     scan = AsyncMock(side_effect=RuntimeError("scan failed"))
     real_scheduler = MonitorScheduler(scan)
     scheduler.run_monitor_now = real_scheduler.run_monitor_now
     scheduler.is_running = real_scheduler.is_running
     await tab_a.open("/")
     click_task_action(tab_a, "alpha", "play_arrow")
-    await asyncio.sleep(0)
+    await wait_for_notification("扫描失败，请查看日志。")
     assert not tab_a.notify.contains("扫描完成")
-    assert tab_a.notify.contains("扫描失败，请查看日志。")
     assert db.get_monitor(monitor_id).last_result == "old summary"
 
     scan.side_effect = complete
     click_task_action(tab_a, "alpha", "play_arrow")
-    await asyncio.sleep(0)
-    assert tab_a.notify.contains("扫描完成: new summary")
+    await wait_for_notification("扫描完成: new summary")
     assert scan.await_count == 2
 
 
