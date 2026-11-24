@@ -1,5 +1,7 @@
 """Discover and judge durable candidates for one monitor scan."""
 
+from __future__ import annotations
+
 import json
 import logging
 from collections.abc import Awaitable, Callable
