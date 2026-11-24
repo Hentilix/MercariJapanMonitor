@@ -92,13 +92,16 @@ async def discover(client: MercariClient, db: Database, monitor: Monitor,
         candidates = []
         refresh = []
         discard = []
-        for item in {item.id: item for item in items}.values():
-            pending = db.has_candidate(monitor.id, item.id)
-            decision = db.product_decision(monitor.id, item.id)
+        items_by_id = {item.id: item for item in items}
+        statuses = db.page_item_statuses(monitor.id, items_by_id)
+        for item_id, item in items_by_id.items():
+            status = statuses[item_id]
+            pending = status.pending
+            decision = status.decision
             needs_judgment = monitor.needs_judgment(decision)
             eligible = (pending or phase == "first" or (decision is not None and needs_judgment) or
                         (item.created_epoch is not None and item.created_epoch >= state["since"]) or
-                        db.wants_recheck(monitor.id, item.id))
+                        status.recheck)
             if not eligible and item.created_epoch is None:
                 if phase == "deep":
                     result.missing_dates += 1
@@ -112,7 +115,7 @@ async def discover(client: MercariClient, db: Database, monitor: Monitor,
                     discard.append(item.id)
                 continue
             candidate_ids.add(item.id)
-            if db.is_ignored(monitor.id, item.id):
+            if status.ignored:
                 ignored_ids.add(item.id)
             elif not needs_judgment:
                 seen_ids.add(item.id)

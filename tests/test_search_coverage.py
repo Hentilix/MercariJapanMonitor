@@ -6,7 +6,9 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from app.coverage import discover
 from app.database import Database
+from app.filter import FilterRule
 from app.mercari import InvalidPageToken, ItemDetail, MercariError, SearchItem, SearchPage
 from app.scanner import scan_monitor
 
@@ -570,3 +572,24 @@ def test_deep_token_cycle_and_missing_dates_are_reported(tmp_path):
     assert "重置 1 次" in summary
     assert "补扫缺发布时间 1 件" in summary
     db.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("page_size", [1, 120])
+async def test_page_status_lookup_uses_one_select(page_size):
+    db = Database(":memory:")
+    try:
+        mon = db.get_monitor(db.create_monitor(name="CD", keywords="CD"))
+        client = AsyncMock()
+        client.search_page.return_value = SearchPage(
+            [SearchItem(str(i), "CD", 100, "url") for i in range(page_size)], None,
+        )
+        reads = []
+        db._conn.set_trace_callback(
+            lambda sql: reads.append(sql) if sql.lstrip().upper().startswith(("SELECT", "WITH")) else None
+        )
+        result = await discover(client, db, mon, FilterRule(keywords=["CD"]))
+        assert result.queued == page_size
+        assert len(reads) == 2  # load progress, then all listing statuses
+    finally:
+        db.close()

@@ -92,6 +92,14 @@ def _search_settings(keywords, mode, min_price, max_price, filter_words) -> tupl
 
 
 @dataclass(frozen=True)
+class PageItemStatus:
+    pending: bool
+    decision: tuple[int, int | None] | None
+    ignored: bool
+    recheck: bool
+
+
+@dataclass(frozen=True)
 class MailBatch:
     message_id: str
     label: str
@@ -211,6 +219,33 @@ class Database:
         selected = {row[0] for row in newest}
         oldest = [row for row in rows if row[0] not in selected][:limit - len(newest)]
         return newest + oldest
+
+    def page_item_statuses(
+        self, monitor_id: int, item_ids: Iterable[str],
+    ) -> dict[str, PageItemStatus]:
+        """Read candidate, decision and ignore state for one search page."""
+        ids = tuple(item_ids)
+        if not ids:
+            return {}
+        placeholders = ", ".join("(?)" for _ in ids)
+        rows = self._conn.execute(
+            f"""WITH page(mercari_id) AS (VALUES {placeholders})
+                SELECT page.mercari_id, c.id IS NOT NULL, p.matched, p.judged_rule_version,
+                       i.id IS NOT NULL, r.mercari_id IS NOT NULL
+                FROM page
+                LEFT JOIN scan_candidates c ON c.monitor_id=? AND c.mercari_id=page.mercari_id
+                LEFT JOIN monitor_products p ON p.monitor_id=? AND p.mercari_id=page.mercari_id
+                LEFT JOIN ignored_products i ON i.monitor_id=? AND i.mercari_id=page.mercari_id
+                LEFT JOIN scan_rechecks r ON r.monitor_id=? AND r.mercari_id=page.mercari_id""",
+            (*ids, monitor_id, monitor_id, monitor_id, monitor_id),
+        )
+        return {
+            item_id: PageItemStatus(
+                bool(pending), (matched, version) if matched is not None else None,
+                bool(ignored), bool(recheck),
+            )
+            for item_id, pending, matched, version, ignored, recheck in rows
+        }
 
     def has_candidate(self, monitor_id: int, mercari_id: str) -> bool:
         return self._conn.execute(
